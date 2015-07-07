@@ -37,7 +37,7 @@ object CassandraSparkBuild extends Build {
   lazy val embedded = CrossScalaVersionsProject(
     name = s"$namespace-embedded",
     conf = defaultSettings ++ Seq(libraryDependencies ++= Dependencies.embedded)
-  ).disablePlugins(AssemblyPlugin) configs (IntegrationTest, ClusterIntegrationTest)
+  ).disablePlugins(AssemblyPlugin) configs IntegrationTest
 
   lazy val connector = CrossScalaVersionsProject(
     name = namespace,
