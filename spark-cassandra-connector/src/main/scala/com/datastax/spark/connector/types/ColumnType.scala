@@ -90,7 +90,7 @@ object ColumnType {
       case (_, DataType.Name.MAP)  => MapType(typeArgs(0), typeArgs(1))
       case (userType: DriverUserType, _) => UserDefinedType(userType.getTypeName, fields(userType))
       case (tupleType: DriverTupleType, _) => TupleType(fields(tupleType): _*)
-      case _ => primitiveTypeMap(dataType)
+      case _ => primitiveTypeMap.getOrElse(dataType, OtherType)
     }
   }
 

@@ -157,3 +157,10 @@ case object TimeType extends PrimitiveColumnType[Long] {
   def converterToCassandra =
     new TypeConverter.OptionToNullConverter(TypeConverter.TimeTypeConverter)
 }
+
+case object OtherType extends PrimitiveColumnType[AnyRef] {
+  def scalaTypeTag = TypeTag.synchronized { implicitly[TypeTag[AnyRef]]}
+  def cqlTypeName = "unknown"
+  def converterToCassandra =
+      new TypeConverter.OptionToNullConverter(TypeConverter.AnyRefConverter)
+}
