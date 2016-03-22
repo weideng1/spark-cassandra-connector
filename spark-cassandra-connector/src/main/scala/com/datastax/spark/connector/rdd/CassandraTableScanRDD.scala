@@ -5,18 +5,17 @@ import java.io.IOException
 import scala.collection.JavaConversions._
 import scala.language.existentials
 import scala.reflect.ClassTag
-
 import org.apache.spark.metrics.InputMetricsUpdater
-import org.apache.spark.{Partition, SparkContext, TaskContext}
-
+import org.apache.spark.{Partition, Partitioner, SparkContext, TaskContext}
 import com.datastax.driver.core._
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql._
 import com.datastax.spark.connector.rdd.partitioner.dht.TokenFactory
-import com.datastax.spark.connector.rdd.partitioner.{NodeAddresses, CassandraPartition, CassandraRDDPartitioner, CqlTokenRange}
+import com.datastax.spark.connector.rdd.partitioner.{CassandraPartition, CassandraRDDPartitioner, CqlTokenRange, NodeAddresses}
 import com.datastax.spark.connector.rdd.reader._
 import com.datastax.spark.connector.types.ColumnType
-import com.datastax.spark.connector.util.CountingIterator
+import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
+import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, Predicate, RangePredicate}
 import com.datastax.spark.connector.util.Quote._
 
 
@@ -130,19 +129,29 @@ class CassandraTableScanRDD[R] private[connector](
   }
 
   /** Extracts a key of the given class from the given columns.
+    *
     *  @see `keyBy(ColumnSelector)` */
   def keyBy[K : RowReaderFactory](columns: ColumnRef*): CassandraTableScanRDD[(K, R)] =
     keyBy(SomeColumns(columns: _*))
 
   /** Extracts a key of the given class from all the available columns.
+    *
     * @see `keyBy(ColumnSelector)` */
   def keyBy[K : RowReaderFactory]: CassandraTableScanRDD[(K, R)] =
     keyBy(AllColumns)
 
+
+  @transient override val partitioner: Option[Partitioner] = {
+    if (containsPartitionKey(where)) {
+      Some(CassandraRDDPartitioner(connector, tableDef, Some(1), splitSize))
+    } else {
+      Some(CassandraRDDPartitioner(connector, tableDef, splitCount, splitSize))
+    }
+  }
+
   override def getPartitions: Array[Partition] = {
     verify() // let's fail fast
-    val partitioner = CassandraRDDPartitioner(connector, tableDef, splitCount, splitSize)
-    val partitions = partitioner.partitions(where)
+    val partitions = partitioner.get.asInstanceOf[CassandraRDDPartitioner[_, _]].partitions
     logDebug(s"Created total ${partitions.length} partitions for $keyspaceName.$tableName.")
     logTrace("Partitions: \n" + partitions.mkString("\n"))
     partitions
@@ -269,6 +278,31 @@ class CassandraTableScanRDD[R] private[connector](
 
     counts.reduce(_ + _)
   }
+
+
+  private def containsPartitionKey(clause: CqlWhereClause) = {
+    val pk = tableDef.partitionKey.map(_.columnName).toSet
+    val wherePredicates: Seq[Predicate] = clause.predicates.flatMap(CqlWhereParser.parse)
+
+    val whereColumns: Set[String] = wherePredicates.collect {
+      case EqPredicate(c, _) if pk.contains(c) => c
+      case InPredicate(c) if pk.contains(c) => c
+      case InListPredicate(c, _) if pk.contains(c) => c
+      case RangePredicate(c, _, _) if pk.contains(c) =>
+        throw new UnsupportedOperationException(
+          s"Range predicates on partition key columns (here: $c) are " +
+            s"not supported in where. Use filter instead.")
+    }.toSet
+
+    if (whereColumns.nonEmpty && whereColumns.size < pk.size) {
+      val missing = pk -- whereColumns
+      throw new UnsupportedOperationException(
+        s"Partition key predicate must include all partition key columns. Missing columns: ${missing.mkString(",")}"
+      )
+    }
+    whereColumns.nonEmpty
+  }
+
 }
 
 object CassandraTableScanRDD {

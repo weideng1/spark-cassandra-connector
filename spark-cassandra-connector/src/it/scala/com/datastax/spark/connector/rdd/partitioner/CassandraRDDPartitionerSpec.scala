@@ -26,7 +26,7 @@ class CassandraRDDPartitionerSpec
   private def testPartitionCount(numPartitions: Int, min: Int, max: Int): Unit = {
     val table = Schema.fromCassandra(conn, Some(ks), Some("empty")).tables.head
     val partitioner = CassandraRDDPartitioner(conn, table, Some(numPartitions), 10000)
-    val partitions = partitioner.partitions(CqlWhereClause.empty)
+    val partitions = partitioner.partitions
     partitions.length should be >= min
     partitions.length should be <= max
   }
@@ -65,7 +65,7 @@ class CassandraRDDPartitionerSpec
 
     val table = Schema.fromCassandra(conn, Some(ks), Some(tableName)).tables.head
     val partitioner = CassandraRDDPartitioner(conn, table, splitCount = None, splitSize = 1000000)
-    val partitions = partitioner.partitions(CqlWhereClause.empty)
+    val partitions = partitioner.partitions
 
     // theoretically there should be 64 splits, but it is ok to be "a little" inaccurate
     partitions.length should be >= 16
@@ -75,7 +75,7 @@ class CassandraRDDPartitionerSpec
   it should "align index fields of partitions with their place in the array" in {
     val table = Schema.fromCassandra(conn, Some(ks), Some("data")).tables.head
     val partitioner = CassandraRDDPartitioner(conn, table, splitCount = Some(1000), splitSize = 100)
-    val partToIndex = partitioner.partitions(CqlWhereClause.empty).zipWithIndex
+    val partToIndex = partitioner.partitions.zipWithIndex
     forAll (partToIndex) { case (part, index) => part.index should be (index) }
   }
 

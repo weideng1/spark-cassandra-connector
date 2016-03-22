@@ -7,6 +7,7 @@ import scala.collection.parallel.ForkJoinTaskSupport
 import scala.concurrent.forkjoin.ForkJoinPool
 
 import org.apache.spark.Partition
+import org.apache.spark.Partitioner
 
 import com.datastax.driver.core.{Metadata, TokenRange => DriverTokenRange}
 import com.datastax.spark.connector.cql.{CassandraConnector, TableDef}
@@ -17,13 +18,14 @@ import com.datastax.spark.connector.util.CqlWhereParser._
 import com.datastax.spark.connector.util.Quote._
 
 /** Creates CassandraPartitions for given Cassandra table */
-class CassandraRDDPartitioner[V, T <: Token[V]](
+class CassandraRDDPartitioner[V, T <: Token[V]] (
     connector: CassandraConnector,
     tableDef: TableDef,
     splitCount: Option[Int],
     splitSize: Long)(
   implicit
-    tokenFactory: TokenFactory[V, T]) {
+    tokenFactory: TokenFactory[V, T])
+  extends Partitioner {
 
   type Token = com.datastax.spark.connector.rdd.partitioner.dht.Token[T]
   type TokenRange = com.datastax.spark.connector.rdd.partitioner.dht.TokenRange[V, T]
@@ -95,32 +97,11 @@ class CassandraRDDPartitioner[V, T <: Token[V]](
     }
   }
 
-  private def containsPartitionKey(clause: CqlWhereClause) = {
-    val pk = tableDef.partitionKey.map(_.columnName).toSet
-    val wherePredicates: Seq[Predicate] = clause.predicates.flatMap(CqlWhereParser.parse)
 
-    val whereColumns: Set[String] = wherePredicates.collect {
-      case EqPredicate(c, _) if pk.contains(c) => c
-      case InPredicate(c) if pk.contains(c) => c
-      case InListPredicate(c, _) if pk.contains(c) => c
-      case RangePredicate(c, _, _) if pk.contains(c) =>
-        throw new UnsupportedOperationException(
-          s"Range predicates on partition key columns (here: $c) are " +
-            s"not supported in where. Use filter instead.")
-    }.toSet
-
-    if (whereColumns.nonEmpty && whereColumns.size < pk.size) {
-      val missing = pk -- whereColumns
-      throw new UnsupportedOperationException(
-        s"Partition key predicate must include all partition key columns. Missing columns: ${missing.mkString(",")}"
-      )
-    }
-
-    whereColumns.nonEmpty
-  }
 
   /** Computes Spark partitions of the given table. Called by [[CassandraTableScanRDD]]. */
-  def partitions(whereClause: CqlWhereClause): Array[Partition] = {
+  val partitions: Array[Partition] = {
+
     val tokenRanges = describeRing
     val endpointCount = tokenRanges.map(_.replicas).reduce(_ ++ _).size
     val splitter = createTokenRangeSplitter
@@ -129,28 +110,34 @@ class CassandraRDDPartitioner[V, T <: Token[V]](
     val clusterer = new TokenRangeClusterer[V, T](splitSize, maxGroupSize)
     val groups = clusterer.group(splits).toArray
 
-    if (containsPartitionKey(whereClause)) {
-      val replicas = tokenRanges.flatMap(_.replicas)
-      Array(CassandraPartition(0, replicas, List(CqlTokenRange("")), 0))
-    }
-    else {
-      val partMetadata = for (group <- groups) yield {
+    splitCount match {
+      case Some(1) => {
+        val replicas = tokenRanges.flatMap(_.replicas)
+        Array(CassandraPartition(0, replicas, List(CqlTokenRange("")), 0))
+      }
+
+      case _ => {
+        val partMetadata = for (group <- groups) yield {
         val cqlPredicates = group.flatMap(splitToCqlClause)
         val replicas = group.map(_.replicas).reduce(_ intersect _)
         val rowCount = group.map(_.dataSize).sum
         (replicas, cqlPredicates, rowCount)
+        }
+        // Sort metadata so that partitions with more possible replicas are computed last
+        // This gives us a greater chance that we'll be able to locally schedule a late task
+        partMetadata
+          .sortBy{ case (replicas, cqlPredicates, rowCount) => (replicas.size, -rowCount)}
+          .zipWithIndex
+          .map { case ((replicas, cqlPredicates, rowCount), index) =>
+            CassandraPartition(index, replicas, cqlPredicates, rowCount)
+          }.toArray
       }
-      // Sort metadata so that partitions with more possible replicas are computed last
-      // This gives us a greater chance that we'll be able to locally schedule a late task
-      partMetadata
-        .sortBy{ case (replicas, cqlPredicates, rowCount) => (replicas.size, -rowCount)}
-        .zipWithIndex
-        .map { case ((replicas, cqlPredicates, rowCount), index) =>
-          CassandraPartition(index, replicas, cqlPredicates, rowCount)
-        }.toArray
     }
   }
 
+  override def getPartition(key: Any): Int = ???
+
+  override def numPartitions: Int = partitions.length
 }
 
 object CassandraRDDPartitioner {
@@ -171,10 +158,10 @@ object CassandraRDDPartitioner {
     * and therefore you don't need to specify the ones proper for the partitioner used in the
     * Cassandra cluster. */
   def apply(
-      conn: CassandraConnector,
-      tableDef: TableDef,
-      splitCount: Option[Int],
-      splitSize: Int): CassandraRDDPartitioner[V, T] = {
+    conn: CassandraConnector,
+    tableDef: TableDef,
+    splitCount: Option[Int],
+    splitSize: Int): CassandraRDDPartitioner[V, T] = {
 
     val tokenFactory = getTokenFactory(conn)
     new CassandraRDDPartitioner(conn, tableDef, splitCount, splitSize)(tokenFactory)
