@@ -188,7 +188,7 @@ object WriteConf {
 
     val ttlSeconds = conf.getInt(TtlParam.name, TtlParam.default)
 
-    val ttlOption = if(ttlSeconds == TtlParam.default) TTLOption.defaultValue else TTLOption.perRow(ttlSeconds.toString)
+    val ttlOption = if(ttlSeconds == TtlParam.default) TTLOption.defaultValue else TTLOption.constant(ttlSeconds)
 
     WriteConf(
       batchSize = batchSize,

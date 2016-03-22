@@ -87,7 +87,8 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
       .options(
         Map(
           "table" -> "kv_copy",
-          "keyspace" -> ks
+          "keyspace" -> ks,
+          "spark_cassandra_output_ttl" -> "300"
         )
       )
       .save()
@@ -104,6 +105,14 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
       .load()
 
     dfCopy.count() should be (1000)
+
+    val ttl = conn.withSessionDo { session =>
+      val rs = session.execute(s"""SELECT TTL(v) from $ks.kv_copy""")
+      rs.one().getInt(0)
+    }
+
+    ttl should be > 0
+    ttl should be < 300
   }
 
   it should " be able to create a C* schema from a table" in {
