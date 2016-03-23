@@ -1,0 +1,36 @@
+package com.datastax.spark.connector.rdd.partitioner
+
+import com.datastax.driver.core.{Token, MetadataHook}
+import com.datastax.spark.connector.cql.{CassandraConnector, TableDef}
+import com.datastax.spark.connector.util.PatitionKeyTools._
+import com.datastax.spark.connector.writer.{BoundStatementBuilder, RoutingKeyGenerator, RowWriter}
+import org.apache.spark.Logging
+
+/**
+  * A utility class for determining the token of a given key. Uses a bound statement to determine
+  * the routing key and the uses that with the TokenFactory to determine the hashed Token.
+  */
+private[connector] class TokenGenerator[T] (
+  connector: CassandraConnector,
+  tableDef: TableDef,
+  rowWriter: RowWriter[T]) extends Serializable with Logging {
+
+  val protocolVersion = connector.withSessionDo { session =>
+    session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
+  }
+
+  val stmt = connector.withSessionDo { session => prepareDummyStatement(session, tableDef) }
+  val metadata = connector.withClusterDo(_.getMetadata)
+
+  val routingKeyGenerator = new RoutingKeyGenerator(tableDef, tableDef.partitionKey.map(_
+    .columnName))
+
+  val boundStmtBuilder = new BoundStatementBuilder(
+    rowWriter,
+    stmt,
+    protocolVersion = protocolVersion)
+
+  def getTokenFor(key: T): Token = {
+    MetadataHook.newToken(metadata, routingKeyGenerator.apply(boundStmtBuilder.bind(key)))
+  }
+}

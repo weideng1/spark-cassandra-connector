@@ -2,21 +2,23 @@ package com.datastax.spark.connector.rdd
 
 import java.io.IOException
 
+import com.datastax.spark.connector._
+import com.datastax.spark.connector.cql._
+import com.datastax.spark.connector.rdd.partitioner._
+import com.datastax.spark.connector.rdd.reader._
+import com.datastax.spark.connector.types.ColumnType
+import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, Predicate, RangePredicate}
+import com.datastax.spark.connector.util.Quote._
+import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
+
+import com.datastax.driver.core._
+
+import org.apache.spark.metrics.InputMetricsUpdater
+import org.apache.spark.{Partition, SparkContext, TaskContext}
+
 import scala.collection.JavaConversions._
 import scala.language.existentials
 import scala.reflect.ClassTag
-import org.apache.spark.metrics.InputMetricsUpdater
-import org.apache.spark.{Partition, Partitioner, SparkContext, TaskContext}
-import com.datastax.driver.core._
-import com.datastax.spark.connector._
-import com.datastax.spark.connector.cql._
-import com.datastax.spark.connector.rdd.partitioner.dht.TokenFactory
-import com.datastax.spark.connector.rdd.partitioner.{CassandraPartition, CassandraRDDPartitioner, CqlTokenRange, NodeAddresses}
-import com.datastax.spark.connector.rdd.reader._
-import com.datastax.spark.connector.types.ColumnType
-import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
-import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, Predicate, RangePredicate}
-import com.datastax.spark.connector.util.Quote._
 
 
 /** RDD representing a Table Scan of A Cassandra table.
@@ -100,6 +102,8 @@ class CassandraTableScanRDD[R] private[connector](
       readConf = readConf)
   }
 
+
+
   override protected def convertTo[B : ClassTag : RowReaderFactory]: CassandraTableScanRDD[B] = {
     new CassandraTableScanRDD[B](
       sc = sc,
@@ -122,6 +126,7 @@ class CassandraTableScanRDD[R] private[connector](
     *                useful when the key is mapped to a tuple or a single value
     */
   def keyBy[K : RowReaderFactory](columns: ColumnSelector): CassandraTableScanRDD[(K, R)] = {
+
     val kRRF = implicitly[RowReaderFactory[K]]
     val vRRF = rowReaderFactory
     implicit val kvRRF = new KeyValueRowReaderFactory[K, R](columns, kRRF, vRRF)
@@ -140,18 +145,17 @@ class CassandraTableScanRDD[R] private[connector](
   def keyBy[K : RowReaderFactory]: CassandraTableScanRDD[(K, R)] =
     keyBy(AllColumns)
 
-
-  @transient override val partitioner: Option[Partitioner] = {
-    if (containsPartitionKey(where)) {
-      Some(CassandraRDDPartitioner(connector, tableDef, Some(1), splitSize))
-    } else {
-      Some(CassandraRDDPartitioner(connector, tableDef, splitCount, splitSize))
+  lazy val partitionGenerator = {
+    if (containsPartitionKey (where) ) {
+      CassandraRDDPartitionGenerator (connector, tableDef, Some (1), splitSize)
+      } else {
+      CassandraRDDPartitionGenerator (connector, tableDef, splitCount, splitSize)
     }
   }
 
   override def getPartitions: Array[Partition] = {
     verify() // let's fail fast
-    val partitions = partitioner.get.asInstanceOf[CassandraRDDPartitioner[_, _]].partitions
+    val partitions = partitionGenerator.partitions
     logDebug(s"Created total ${partitions.length} partitions for $keyspaceName.$tableName.")
     logTrace("Partitions: \n" + partitions.mkString("\n"))
     partitions
@@ -302,7 +306,6 @@ class CassandraTableScanRDD[R] private[connector](
     }
     whereColumns.nonEmpty
   }
-
 }
 
 object CassandraTableScanRDD {

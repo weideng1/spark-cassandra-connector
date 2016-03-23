@@ -2,7 +2,7 @@ package com.datastax.spark.connector.rdd.partitioner.dht
 
 import scala.language.existentials
 
-trait TokenFactory[V, T <: Token[V]] {
+trait TokenFactory[V, T <: Token[V]] extends Serializable{
   def minToken: T
   def maxToken: T
 

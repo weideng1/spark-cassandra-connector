@@ -5,27 +5,78 @@ import java.net.InetAddress
 import scala.collection.JavaConversions._
 import scala.collection.parallel.ForkJoinTaskSupport
 import scala.concurrent.forkjoin.ForkJoinPool
-
 import org.apache.spark.Partition
 import org.apache.spark.Partitioner
-
 import com.datastax.driver.core.{Metadata, TokenRange => DriverTokenRange}
+import com.datastax.spark.connector.PartitionKeyColumns
 import com.datastax.spark.connector.cql.{CassandraConnector, TableDef}
 import com.datastax.spark.connector.rdd._
 import com.datastax.spark.connector.rdd.partitioner.dht.{Token, TokenFactory}
-import com.datastax.spark.connector.util.CqlWhereParser
-import com.datastax.spark.connector.util.CqlWhereParser._
 import com.datastax.spark.connector.util.Quote._
+import com.datastax.spark.connector.writer.{RowWriterFactory}
 
+import scala.reflect.ClassTag
+
+class CassandraRDDPartitioner[Key : ClassTag, V](
+  partitions: Seq[(Int, Seq[(V, V, Boolean)])],
+  tableDef: TableDef,
+  connector: CassandraConnector,
+  tokenBounds: (V, V))(
+implicit
+  rwf:RowWriterFactory[Key]) extends Partitioner {
+
+  val (minToken, maxToken) = tokenBounds
+
+  lazy val tokenGenerator = {
+    val partitionKeyWriter = implicitly[RowWriterFactory[Key]]
+      .rowWriter (tableDef, PartitionKeyColumns.selectFrom(tableDef))
+
+    new TokenGenerator(connector, tableDef, partitionKeyWriter)
+  }
+
+  override def getPartition(key: Any): Int = {
+    key match {
+      case x: Key => {
+        val token = tokenGenerator.getTokenFor(x)
+        indexOfPartitionContaining(token)
+      }
+      case other => throw new IllegalArgumentException(s"Couldn't determine the key from object $other")
+    }
+  }
+
+  def indexOfPartitionContaining(token: com.datastax.driver.core.Token): Int = {
+    0
+    /*
+    val tokenValue = token.asInstanceOf[Ordered[V]]
+    val minTokenValue = minToken
+    val maxTokenValue = maxToken
+    partitions.find { case (index, ranges) =>
+      ranges.exists{ case (start, end, wrap) =>
+          if (end == minTokenValue && start < tokenValue) {
+            true
+          } else if ( start == minTokenValue && end >= tokenValue) {
+            true
+          } else if ( !wrap && start < tokenValue && end >= tokenValue) {
+            true
+          } else if ( wrap && start < tokenValue || end > tokenValue) {
+            true
+          } else false
+      }
+    }.get._1
+    */
+  }
+
+  override def numPartitions: Int = partitions.length
+
+}
 /** Creates CassandraPartitions for given Cassandra table */
-class CassandraRDDPartitioner[V, T <: Token[V]] (
+class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     connector: CassandraConnector,
-    tableDef: TableDef,
+    val tableDef: TableDef,
     splitCount: Option[Int],
     splitSize: Long)(
   implicit
-    tokenFactory: TokenFactory[V, T])
-  extends Partitioner {
+    tokenFactory: TokenFactory[V, T]){
 
   type Token = com.datastax.spark.connector.rdd.partitioner.dht.Token[T]
   type TokenRange = com.datastax.spark.connector.rdd.partitioner.dht.TokenRange[V, T]
@@ -52,6 +103,10 @@ class CassandraRDDPartitioner[V, T <: Token[V]] (
     new TokenRange(startToken, endToken, replicas, dataSize)
   }
 
+  def fullRange: TokenRange = {
+    new TokenRange(tokenFactory.minToken, tokenFactory.maxToken, Set.empty, 0)
+  }
+
   private def describeRing: Seq[TokenRange] = {
     connector.withClusterDo { cluster =>
       val metadata = cluster.getMetadata
@@ -64,7 +119,7 @@ class CassandraRDDPartitioner[V, T <: Token[V]] (
       splitter: TokenRangeSplitter[V, T]): Iterable[TokenRange] = {
 
     val parTokenRanges = tokenRanges.par
-    parTokenRanges.tasksupport = new ForkJoinTaskSupport(CassandraRDDPartitioner.pool)
+    parTokenRanges.tasksupport = new ForkJoinTaskSupport(CassandraRDDPartitionGenerator.pool)
     (for (tokenRange <- parTokenRanges;
           split <- splitter.split(tokenRange, splitSize)) yield split).seq
   }
@@ -97,50 +152,68 @@ class CassandraRDDPartitioner[V, T <: Token[V]] (
     }
   }
 
-
-
   /** Computes Spark partitions of the given table. Called by [[CassandraTableScanRDD]]. */
-  val partitions: Array[Partition] = {
+  lazy val partitions: Array[Partition] = internalPartitioning
+    .map{ case (_, _, partition) => partition }
+    .toArray
 
-    val tokenRanges = describeRing
+  lazy val tokenRangePartitions = internalPartitioning
+    .map{ case (index, ranges, _) =>
+      (index,
+        ranges.map { range =>
+        val startToken = range.start.value
+        val endToken = range.end.value
+        val isWrapAround = range.isWrapAround
+        (startToken, endToken, isWrapAround)})
+      }
+
+  /**
+    * Generates a list of the CassandraPartitions to be used in the TableScanRDD and a list
+    * of the TokenRanges used to craft those partitions along with their indexes. We need the
+    * TokenRanges seperate in order to perform tests of token ownership.
+    */
+  lazy val internalPartitioning: Seq[(Int, Seq[TokenRange], CassandraPartition)] = {
+
+    val tokenRanges = splitCount match {
+      case Some(1) => Seq(fullRange)
+      case _ => describeRing
+    }
+
     val endpointCount = tokenRanges.map(_.replicas).reduce(_ ++ _).size
     val splitter = createTokenRangeSplitter
     val splits = splitsOf(tokenRanges, splitter).toSeq
     val maxGroupSize = tokenRanges.size / endpointCount
     val clusterer = new TokenRangeClusterer[V, T](splitSize, maxGroupSize)
-    val groups = clusterer.group(splits).toArray
+    val tokenRangeGroups = clusterer.group(splits).toArray
 
-    splitCount match {
-      case Some(1) => {
-        val replicas = tokenRanges.flatMap(_.replicas)
-        Array(CassandraPartition(0, replicas, List(CqlTokenRange("")), 0))
-      }
+    val tokenGroupsWithMetadata = for (group <- tokenRangeGroups) yield {
+      val replicas = group.map(_.replicas).reduce(_ intersect _)
+      val rowCount = group.map(_.dataSize).sum
+      (replicas, rowCount, group)
+    }
 
-      case _ => {
-        val partMetadata = for (group <- groups) yield {
-        val cqlPredicates = group.flatMap(splitToCqlClause)
-        val replicas = group.map(_.replicas).reduce(_ intersect _)
-        val rowCount = group.map(_.dataSize).sum
-        (replicas, cqlPredicates, rowCount)
-        }
-        // Sort metadata so that partitions with more possible replicas are computed last
-        // This gives us a greater chance that we'll be able to locally schedule a late task
-        partMetadata
-          .sortBy{ case (replicas, cqlPredicates, rowCount) => (replicas.size, -rowCount)}
-          .zipWithIndex
-          .map { case ((replicas, cqlPredicates, rowCount), index) =>
-            CassandraPartition(index, replicas, cqlPredicates, rowCount)
-          }.toArray
-      }
+    val sortedGroups = tokenGroupsWithMetadata
+      .sortBy { case (replicas, rowCount, group) => (replicas.size, -rowCount) }
+      .zipWithIndex
+
+    for (((replicas, rowCount, group), index) <- sortedGroups) yield {
+      val cqlPredicates = group.flatMap(splitToCqlClause)
+      (index, group, CassandraPartition(index, replicas, cqlPredicates, rowCount))
     }
   }
 
-  override def getPartition(key: Any): Int = ???
+  def getPartitioner[Key: ClassTag]()(
+    implicit rowWriterFactory: RowWriterFactory[Key]) : CassandraRDDPartitioner[Key, V] = {
+    new CassandraRDDPartitioner[Key, V](
+      tokenRangePartitions,
+      tableDef,
+      connector,
+      (tokenFactory.minToken.value, tokenFactory.maxToken.value))
+  }
 
-  override def numPartitions: Int = partitions.length
 }
 
-object CassandraRDDPartitioner {
+object CassandraRDDPartitionGenerator {
   /** Affects how many concurrent threads are used to fetch split information from cassandra nodes, in `getPartitions`.
     * Does not affect how many Spark threads fetch data from Cassandra. */
   val MaxParallelism = 16
@@ -153,7 +226,7 @@ object CassandraRDDPartitioner {
   type V = t forSome { type t }
   type T = t forSome { type t <: Token[V] }
 
-  /** Creates a `CassandraRDDPartitioner` for the given cluster and table.
+  /** Creates a `CassandraRDDPartitionGenerator` for the given cluster and table.
     * Unlike the class constructor, this method does not take the generic `V` and `T` parameters,
     * and therefore you don't need to specify the ones proper for the partitioner used in the
     * Cassandra cluster. */
@@ -161,10 +234,10 @@ object CassandraRDDPartitioner {
     conn: CassandraConnector,
     tableDef: TableDef,
     splitCount: Option[Int],
-    splitSize: Int): CassandraRDDPartitioner[V, T] = {
+    splitSize: Int): CassandraRDDPartitionGenerator[V, T] = {
 
     val tokenFactory = getTokenFactory(conn)
-    new CassandraRDDPartitioner(conn, tableDef, splitCount, splitSize)(tokenFactory)
+    new CassandraRDDPartitionGenerator(conn, tableDef, splitCount, splitSize)(tokenFactory)
   }
 
   def getTokenFactory(conn: CassandraConnector) : TokenFactory[V, T] = {

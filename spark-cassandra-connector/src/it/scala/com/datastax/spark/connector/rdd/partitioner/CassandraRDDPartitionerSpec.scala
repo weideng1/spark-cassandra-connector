@@ -20,18 +20,18 @@ class CassandraRDDPartitionerSpec
     session.execute(s"CREATE TABLE $ks.empty(key INT PRIMARY KEY)")
   }
 
-  // TODO: Currently CassandraRDDPartitioner uses a size-based algorithm that doesn't guarantee exact
+  // TODO: Currently CassandraRDDPartitionGenerator uses a size-based algorithm that doesn't guarantee exact
   // split count, so we are only checking if the split count is "close enough" to the desired value.
   // Should be improved in the future.
   private def testPartitionCount(numPartitions: Int, min: Int, max: Int): Unit = {
     val table = Schema.fromCassandra(conn, Some(ks), Some("empty")).tables.head
-    val partitioner = CassandraRDDPartitioner(conn, table, Some(numPartitions), 10000)
+    val partitioner = CassandraRDDPartitionGenerator(conn, table, Some(numPartitions), 10000)
     val partitions = partitioner.partitions
     partitions.length should be >= min
     partitions.length should be <= max
   }
 
-  "CassandraRDDPartitioner" should "create 1 partition per node if splitCount == 1" in {
+  "CassandraRDDPartitionGenerator" should "create 1 partition per node if splitCount == 1" in {
     testPartitionCount(1, conn.hosts.size, conn.hosts.size)
   }
 
@@ -64,7 +64,7 @@ class CassandraRDDPartitionerSpec
       s"Data size estimates not present after $timeout ms. Test cannot be finished.")
 
     val table = Schema.fromCassandra(conn, Some(ks), Some(tableName)).tables.head
-    val partitioner = CassandraRDDPartitioner(conn, table, splitCount = None, splitSize = 1000000)
+    val partitioner = CassandraRDDPartitionGenerator(conn, table, splitCount = None, splitSize = 1000000)
     val partitions = partitioner.partitions
 
     // theoretically there should be 64 splits, but it is ok to be "a little" inaccurate
@@ -74,7 +74,7 @@ class CassandraRDDPartitionerSpec
 
   it should "align index fields of partitions with their place in the array" in {
     val table = Schema.fromCassandra(conn, Some(ks), Some("data")).tables.head
-    val partitioner = CassandraRDDPartitioner(conn, table, splitCount = Some(1000), splitSize = 100)
+    val partitioner = CassandraRDDPartitionGenerator(conn, table, splitCount = Some(1000), splitSize = 100)
     val partToIndex = partitioner.partitions.zipWithIndex
     forAll (partToIndex) { case (part, index) => part.index should be (index) }
   }

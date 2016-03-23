@@ -12,17 +12,17 @@ public class MetadataHook {
      * Builds a new {@link Token} from a partition key, according to the partitioner reported by the Cassandra nodes.
      *
      * @param metadata               the original driver's metadata.
-     * @param partitionKeyComponents the serialized value of the columns composing the partition key.
+     * @param routingKey             the routing key of the bound partition key
      * @return the token.
      * @throws IllegalStateException if the token factory was not initialized. This would typically
      *                               happen if metadata was explicitly disabled with {@link QueryOptions#setMetadataEnabled(boolean)}
      *                               before startup.
      */
-    public static Token newToken(Metadata metadata, ByteBuffer... partitionKeyComponents) {
-        return metadata.tokenFactory().hash(compose(partitionKeyComponents));
+    public static Token newToken(Metadata metadata, ByteBuffer routingKey) {
+        return metadata.tokenFactory().hash(routingKey);
     }
 
-    // Copied from SimpleStatement
+    /** Copied from SimpleStatement
     private static ByteBuffer compose(ByteBuffer[] buffers) {
         if (buffers.length == 1)
             return buffers[0];
@@ -46,4 +46,5 @@ public class MetadataHook {
         bb.put((byte) ((length >> 8) & 0xFF));
         bb.put((byte) (length & 0xFF));
     }
+     **/
 }
