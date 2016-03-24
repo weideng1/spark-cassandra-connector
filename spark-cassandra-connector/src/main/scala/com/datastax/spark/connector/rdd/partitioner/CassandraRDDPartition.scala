@@ -22,8 +22,9 @@ trait EndpointPartition extends Partition {
   * @param tokenRanges token ranges determining the row set to be fetched
   * @param rowCount estimated total row count in a partition
   */
-case class CassandraPartition(index: Int,
-                              endpoints: Iterable[InetAddress],
-                              tokenRanges: Iterable[CqlTokenRange],
-                              rowCount: Long) extends EndpointPartition
+case class CassandraPartition(
+  index: Int,
+  endpoints: Iterable[InetAddress],
+  tokenRanges: Iterable[CqlTokenRange],
+  rowCount: Long) extends EndpointPartition
 

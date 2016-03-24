@@ -18,12 +18,15 @@ import com.datastax.spark.connector.writer.{RowWriterFactory}
 import scala.reflect.ClassTag
 
 class CassandraRDDPartitioner[Key : ClassTag, V](
-  partitions: Seq[(Int, Seq[(V, V, Boolean)])],
+  val partitions: Seq[CassandraPartition],
   tableDef: TableDef,
   connector: CassandraConnector,
   tokenBounds: (V, V))(
 implicit
   rwf:RowWriterFactory[Key]) extends Partitioner {
+
+  val extractedPartitions = partitions
+    .map(cqlPartition => (cqlPartition.index, cqlPartition.tokenRanges))
 
   val (minToken, maxToken) = tokenBounds
 
@@ -127,18 +130,19 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
   private def splitToCqlClause(range: TokenRange): Iterable[CqlTokenRange] = {
     val startToken = range.start.value
     val endToken = range.end.value
+    val wrapAround = range.isWrapAround
     val pk = tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
 
     if (range.end == tokenFactory.minToken)
-      List(CqlTokenRange(s"token($pk) > ?", startToken))
+      List(CqlTokenRange(s"token($pk) > ?", wrapAround, startToken))
     else if (range.start == tokenFactory.minToken)
-      List(CqlTokenRange(s"token($pk) <= ?", endToken))
+      List(CqlTokenRange(s"token($pk) <= ?", wrapAround, endToken))
     else if (!range.isWrapAround)
-      List(CqlTokenRange(s"token($pk) > ? AND token($pk) <= ?", startToken, endToken))
+      List(CqlTokenRange(s"token($pk) > ? AND token($pk) <= ?", wrapAround, startToken, endToken))
     else
       List(
-        CqlTokenRange(s"token($pk) > ?", startToken),
-        CqlTokenRange(s"token($pk) <= ?", endToken))
+        CqlTokenRange(s"token($pk) > ?", wrapAround, startToken),
+        CqlTokenRange(s"token($pk) <= ?", wrapAround, endToken))
   }
 
   private def createTokenRangeSplitter: TokenRangeSplitter[V, T] = {
@@ -152,27 +156,11 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     }
   }
 
-  /** Computes Spark partitions of the given table. Called by [[CassandraTableScanRDD]]. */
-  lazy val partitions: Array[Partition] = internalPartitioning
-    .map{ case (_, _, partition) => partition }
-    .toArray
-
-  lazy val tokenRangePartitions = internalPartitioning
-    .map{ case (index, ranges, _) =>
-      (index,
-        ranges.map { range =>
-        val startToken = range.start.value
-        val endToken = range.end.value
-        val isWrapAround = range.isWrapAround
-        (startToken, endToken, isWrapAround)})
-      }
-
   /**
     * Generates a list of the CassandraPartitions to be used in the TableScanRDD and a list
-    * of the TokenRanges used to craft those partitions along with their indexes. We need the
-    * TokenRanges seperate in order to perform tests of token ownership.
+    * of the TokenRanges used to craft those partitions along with their indexes.
     */
-  lazy val internalPartitioning: Seq[(Int, Seq[TokenRange], CassandraPartition)] = {
+  lazy val partitions: Seq[CassandraPartition] = {
 
     val tokenRanges = splitCount match {
       case Some(1) => Seq(fullRange)
@@ -198,14 +186,14 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
 
     for (((replicas, rowCount, group), index) <- sortedGroups) yield {
       val cqlPredicates = group.flatMap(splitToCqlClause)
-      (index, group, CassandraPartition(index, replicas, cqlPredicates, rowCount))
+      CassandraPartition(index, replicas, cqlPredicates, rowCount)
     }
   }
 
   def getPartitioner[Key: ClassTag]()(
     implicit rowWriterFactory: RowWriterFactory[Key]) : CassandraRDDPartitioner[Key, V] = {
     new CassandraRDDPartitioner[Key, V](
-      tokenRangePartitions,
+      partitions,
       tableDef,
       connector,
       (tokenFactory.minToken.value, tokenFactory.maxToken.value))

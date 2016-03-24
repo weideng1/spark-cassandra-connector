@@ -42,7 +42,7 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
     val rdd1 = sc.cassandraTable(ks, "table1")
     val partitioner = rdd1.partitionGenerator.getPartitioner[PKey]
     partitioner.numPartitions should be (rdd1.partitions.length)
-    partitioner.getPartition(PKey(5)) should be(1)
+    partitioner.getPartition(PKey(5)) should be(0)
   }
 
   "CassandraTableScanRDD " should " not have partitioners by default" in {

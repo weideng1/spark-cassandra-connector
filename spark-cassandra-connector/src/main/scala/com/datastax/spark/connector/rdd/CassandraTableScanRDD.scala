@@ -10,11 +10,10 @@ import com.datastax.spark.connector.types.ColumnType
 import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, Predicate, RangePredicate}
 import com.datastax.spark.connector.util.Quote._
 import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
-
 import com.datastax.driver.core._
-
+import com.datastax.spark.connector.writer.RowWriterFactory
 import org.apache.spark.metrics.InputMetricsUpdater
-import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.apache.spark.{Partition, Partitioner, SparkContext, TaskContext}
 
 import scala.collection.JavaConversions._
 import scala.language.existentials
@@ -66,7 +65,8 @@ class CassandraTableScanRDD[R] private[connector](
     val where: CqlWhereClause = CqlWhereClause.empty,
     val limit: Option[Long] = None,
     val clusteringOrder: Option[ClusteringOrder] = None,
-    val readConf: ReadConf = ReadConf())(
+    val readConf: ReadConf = ReadConf(),
+    overridePartitioner: Option[Partitioner] = None)(
   implicit
     val classTag: ClassTag[R],
     @transient val rowReaderFactory: RowReaderFactory[R])
@@ -117,6 +117,20 @@ class CassandraTableScanRDD[R] private[connector](
       readConf = readConf)
   }
 
+  def withPartitioner( partitioner: Option[Partitioner]): CassandraTableScanRDD[R] = {
+    new CassandraTableScanRDD[R](
+      sc = sc,
+      connector = connector,
+      keyspaceName = keyspaceName,
+      tableName = tableName,
+      columnNames = columnNames,
+      where = where,
+      limit = limit,
+      clusteringOrder = clusteringOrder,
+      readConf = readConf,
+      overridePartitioner = partitioner)
+  }
+
   /** Selects a subset of columns mapped to the key and returns an RDD of pairs.
     * Similar to the builtin Spark keyBy method, but this one uses implicit
     * RowReaderFactory to construct the key objects.
@@ -125,37 +139,68 @@ class CassandraTableScanRDD[R] private[connector](
     * @param columns column selector passed to the rrf to create the row reader,
     *                useful when the key is mapped to a tuple or a single value
     */
-  def keyBy[K : RowReaderFactory](columns: ColumnSelector): CassandraTableScanRDD[(K, R)] = {
+  def keyBy[K](columns: ColumnSelector)(implicit
+    classtag: ClassTag[K],
+    rrf: RowReaderFactory[K],
+    rwf: RowWriterFactory[K]): CassandraTableScanRDD[(K, R)] = {
 
     val kRRF = implicitly[RowReaderFactory[K]]
     val vRRF = rowReaderFactory
     implicit val kvRRF = new KeyValueRowReaderFactory[K, R](columns, kRRF, vRRF)
-    convertTo[(K, R)]
+
+    val selectedColumnNames = columns.selectFrom(tableDef).map(_.columnName).toSet
+    val partitionKeyColumnNames = PartitionKeyColumns.selectFrom(tableDef).map(_.columnName).toSet
+
+    if (selectedColumnNames.containsAll(partitionKeyColumnNames)) {
+      val partitioner = partitionGenerator.getPartitioner[K]
+
+      convertTo[(K, R)].withPartitioner(Some(partitioner))
+
+    } else {
+      convertTo[(K, R)]
+    }
   }
 
   /** Extracts a key of the given class from the given columns.
     *
     *  @see `keyBy(ColumnSelector)` */
-  def keyBy[K : RowReaderFactory](columns: ColumnRef*): CassandraTableScanRDD[(K, R)] =
+  def keyBy[K](columns: ColumnRef*)(implicit
+    classtag: ClassTag[K],
+    rrf: RowReaderFactory[K],
+    rwf: RowWriterFactory[K]): CassandraTableScanRDD[(K, R)] =
     keyBy(SomeColumns(columns: _*))
 
   /** Extracts a key of the given class from all the available columns.
     *
     * @see `keyBy(ColumnSelector)` */
-  def keyBy[K : RowReaderFactory]: CassandraTableScanRDD[(K, R)] =
+  def keyBy[K]()(implicit
+    classtag: ClassTag[K],
+    rrf: RowReaderFactory[K],
+    rwf: RowWriterFactory[K]): CassandraTableScanRDD[(K, R)] =
     keyBy(AllColumns)
 
   lazy val partitionGenerator = {
-    if (containsPartitionKey (where) ) {
-      CassandraRDDPartitionGenerator (connector, tableDef, Some (1), splitSize)
-      } else {
-      CassandraRDDPartitionGenerator (connector, tableDef, splitCount, splitSize)
+    if (containsPartitionKey(where)) {
+      CassandraRDDPartitionGenerator(connector, tableDef, Some(1), splitSize)
+    } else {
+      CassandraRDDPartitionGenerator(connector, tableDef, splitCount, splitSize)
     }
   }
 
+  @transient override val partitioner = overridePartitioner
+
   override def getPartitions: Array[Partition] = {
     verify() // let's fail fast
-    val partitions = partitionGenerator.partitions
+    val partitions: Array[Partition] = partitioner match {
+      case Some(cassPartitioner: CassandraRDDPartitioner[_, _]) =>
+        cassPartitioner.partitions.toArray[Partition]
+
+      case Some(other: Partitioner) =>
+        throw new IllegalArgumentException(s"Invalid partitioner $other")
+
+      case None => partitionGenerator.partitions.toArray[Partition]
+    }
+
     logDebug(s"Created total ${partitions.length} partitions for $keyspaceName.$tableName.")
     logTrace("Partitions: \n" + partitions.mkString("\n"))
     partitions
