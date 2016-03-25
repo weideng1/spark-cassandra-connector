@@ -31,8 +31,8 @@ class CassandraRDDPartitionerSpec
     partitions.length should be <= max
   }
 
-  "CassandraRDDPartitionGenerator" should "create 1 partition per node if splitCount == 1" in {
-    testPartitionCount(1, conn.hosts.size, conn.hosts.size)
+  "CassandraRDDPartitionGenerator" should "create 1 partition if splitCount == 1" in {
+    testPartitionCount(1, 1, 1)
   }
 
   // we won't run it on a 10000 node cluster, so we don't need to check node count

@@ -108,7 +108,18 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
   }
 
   def fullRange: TokenRange = {
-    new TokenRange(tokenFactory.minToken, tokenFactory.maxToken, Set.empty, 0)
+
+    val replicas = connector
+      .withClusterDo{cluster => cluster.getMetadata}
+      .getAllHosts
+      .map(_.getAddress)
+      .toSet
+
+    new TokenRange(
+      tokenFactory.minToken,
+      tokenFactory.maxToken,
+      replicas,
+      0)
   }
 
   private def describeRing: Seq[TokenRange] = {
