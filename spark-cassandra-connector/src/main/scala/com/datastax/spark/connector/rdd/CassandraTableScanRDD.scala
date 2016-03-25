@@ -179,7 +179,7 @@ class CassandraTableScanRDD[R] private[connector](
     rwf: RowWriterFactory[K]): CassandraTableScanRDD[(K, R)] =
     keyBy(AllColumns)
 
-  lazy val partitionGenerator = {
+  @transient lazy val partitionGenerator = {
     if (containsPartitionKey(where)) {
       CassandraRDDPartitionGenerator(connector, tableDef, Some(1), splitSize)
     } else {
