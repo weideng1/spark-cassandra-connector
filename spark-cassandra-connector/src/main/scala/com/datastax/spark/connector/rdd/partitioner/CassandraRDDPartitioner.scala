@@ -1,7 +1,5 @@
 package com.datastax.spark.connector.rdd.partitioner
 
-import java.net.InetAddress
-
 import scala.collection.JavaConversions._
 import scala.collection.parallel.ForkJoinTaskSupport
 import scala.concurrent.forkjoin.ForkJoinPool
@@ -95,7 +93,7 @@ class CassandraRDDPartitioner[V, T <: Token[V]](
     }
   }
 
-  private def containsPartitionKey(clause: CqlWhereClause) = {
+  private def containsPartitionKey(clause: CqlWhereClause): Boolean = {
     val pk = tableDef.partitionKey.map(_.columnName).toSet
     val wherePredicates: Seq[Predicate] = clause.predicates.flatMap(CqlWhereParser.parse)
 
@@ -109,14 +107,17 @@ class CassandraRDDPartitioner[V, T <: Token[V]](
             s"not supported in where. Use filter instead.")
     }.toSet
 
-    if (whereColumns.nonEmpty && whereColumns.size < pk.size) {
+    val primaryKeyComplete = whereColumns.nonEmpty && whereColumns.size == pk.size
+    val whereColumnsAllIndexed = whereColumns.forall(tableDef.isIndexed)
+
+    if (!primaryKeyComplete && !whereColumnsAllIndexed) {
       val missing = pk -- whereColumns
       throw new UnsupportedOperationException(
         s"Partition key predicate must include all partition key columns. Missing columns: ${missing.mkString(",")}"
       )
     }
 
-    whereColumns.nonEmpty
+    primaryKeyComplete
   }
 
   /** Computes Spark partitions of the given table. Called by [[CassandraTableScanRDD]]. */
