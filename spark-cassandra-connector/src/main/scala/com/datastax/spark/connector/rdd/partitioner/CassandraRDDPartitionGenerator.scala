@@ -15,6 +15,7 @@ import com.datastax.spark.connector.util.Quote._
 import com.datastax.spark.connector.writer.RowWriterFactory
 
 import scala.reflect.ClassTag
+import scala.util.Try
 
 class CassandraRDDPartitioner[Key : ClassTag, V](
   val partitions: Seq[CassandraPartition],
@@ -23,7 +24,7 @@ class CassandraRDDPartitioner[Key : ClassTag, V](
   connector: CassandraConnector,
   tokenBounds: (Token[V], Token[V]))(
 implicit
-  rwf:RowWriterFactory[Key]) extends Partitioner with Logging {
+  @transient rwf:RowWriterFactory[Key]) extends Partitioner with Logging {
 
   implicit val tO = tokenBounds._1.ord
 
@@ -34,10 +35,14 @@ implicit
   val minTokenValue = minToken.value
   val maxTokenValue = maxToken.value
 
-  lazy val tokenGenerator = {
-    val partitionKeyWriter = implicitly[RowWriterFactory[Key]]
+  val partitionKeyWriter = implicitly[RowWriterFactory[Key]]
       .rowWriter (tableDef, PartitionKeyColumns.selectFrom(tableDef))
 
+  /**
+   * Since the Token Generator relies on a (non-serializable) prepared statement we need to
+   * make sure it is not serialized to executors and is made fresh on each executor
+   */
+  @transient lazy val tokenGenerator = {
     new TokenGenerator(connector, tableDef, partitionKeyWriter)
   }
 
@@ -207,14 +212,20 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     }
   }
 
+  /**
+    * Attempts to build a partitioner for this C* RDD if it was keyed with Type Key. If possible
+    * returns a partitioner of type Key.
+    */
   def getPartitioner[Key: ClassTag]()(
-    implicit rowWriterFactory: RowWriterFactory[Key]) : CassandraRDDPartitioner[Key, V] = {
-    new CassandraRDDPartitioner[Key, V](
-      partitions,
-      ranges,
-      tableDef,
-      connector,
-      (tokenFactory.minToken, tokenFactory.maxToken))
+    implicit rowWriterFactory: RowWriterFactory[Key]) : Option[CassandraRDDPartitioner[Key, V]] = {
+    Try {
+      new CassandraRDDPartitioner[Key, V](
+        partitions,
+        ranges,
+        tableDef,
+        connector,
+        (tokenFactory.minToken, tokenFactory.maxToken))
+    }.toOption
   }
 
 }

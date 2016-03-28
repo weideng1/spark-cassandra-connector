@@ -154,7 +154,7 @@ class CassandraTableScanRDD[R] private[connector](
     if (selectedColumnNames.containsAll(partitionKeyColumnNames)) {
       val partitioner = partitionGenerator.getPartitioner[K]
 
-      convertTo[(K, R)].withPartitioner(Some(partitioner))
+      convertTo[(K, R)].withPartitioner(partitioner)
 
     } else {
       convertTo[(K, R)]
@@ -377,9 +377,10 @@ object CassandraTableScanRDD {
     implicit
       keyCT: ClassTag[K],
       valueCT: ClassTag[V],
-      rrf: RowReaderFactory[(K, V)]): CassandraTableScanRDD[(K, V)] = {
+      rrf: RowReaderFactory[(K, V)],
+      rwf: RowWriterFactory[K]): CassandraTableScanRDD[(K, V)] = {
 
-    new CassandraTableScanRDD[(K, V)](
+    val rdd = new CassandraTableScanRDD[(K, V)](
       sc = sc,
       connector = CassandraConnector(sc.getConf),
       keyspaceName = keyspaceName,
@@ -387,5 +388,6 @@ object CassandraTableScanRDD {
       readConf = ReadConf.fromSparkConf(sc.getConf),
       columnNames = AllColumns,
       where = CqlWhereClause.empty)
+    rdd.withPartitioner(rdd.partitionGenerator.getPartitioner[K])
   }
 }

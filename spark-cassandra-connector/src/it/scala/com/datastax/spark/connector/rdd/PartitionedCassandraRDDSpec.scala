@@ -5,8 +5,6 @@ import java.lang.{Long => JLong}
 import scala.concurrent.Future
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql.CassandraConnector
-import com.datastax.spark.connector.embedded.SparkTemplate._
-import com.datastax.spark.connector.rdd.partitioner.EndpointPartition
 import java.lang.{Integer => JInt}
 
 import org.apache.spark.rdd.RDD
@@ -32,7 +30,7 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
       Future {
         session.execute(
           s"""CREATE TABLE $ks.table1 (key INT, ckey INT, value INT, PRIMARY KEY (key, ckey)
-             |)""".stripMargin)
+              |)""".stripMargin)
         val ps = session.prepare( s"""INSERT INTO $ks.table1 (key, ckey, value) VALUES (?, ?, ?)""")
         val results = for (value <- 1 to rowCount) yield {
           session.executeAsync(ps.bind(value: JInt, value: JInt, value: JInt))
@@ -42,27 +40,30 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
       Future {
         session.execute(
           s"""CREATE TABLE $ks.table2 (key INT, ckey INT, value INT, PRIMARY KEY
-             |(key, ckey))""".stripMargin)
+              |(key, ckey))""".stripMargin)
         val ps = session.prepare( s"""INSERT INTO $ks.table2 (key, ckey, value) VALUES (?, ?, ?)""")
         val results = for (value <- 1 to rowCount) yield {
-          session.executeAsync(ps.bind(value: JInt, value: JInt, value: JInt))
+          session.executeAsync(ps.bind(value: JInt, value: JInt, (rowCount - value): JInt))
         }
         results.map(_.get)
       }
     )
   }
 
+  // Make sure that all tests have enough partitions to make things interesting
   val customReadConf = ReadConf(splitCount = Some(20))
 
-  val testRdd: CassandraTableScanRDD[CassandraRow] = sc.cassandraTable[CassandraRow](ks, "table1").withReadConf(customReadConf)
+  val testRdd = sc.cassandraTable(ks, "table1").withReadConf(customReadConf)
+  val joinTarget = sc.cassandraTable(ks, "table2")
 
   def getPartitionMap[T](rdd: RDD[T]): Map[T, Int] = {
-    rdd.mapPartitionsWithIndex{ case (index, it) =>
-      it.map(row => (row, index)) }.collect.toMap
+    rdd.mapPartitionsWithIndex { case (index, it) =>
+      it.map(row => (row, index))
+    }.collect.toMap
   }
 
   def checkPartitionerKeys[K: ClassTag, V: ClassTag](rdd: RDD[(K, V)]): Unit = {
-    rdd.partitioner.isDefined should be(true)
+    rdd.partitioner shouldBe defined
     val partitioner = rdd.partitioner.get
     val realPartitionMap = getPartitionMap(rdd.keys)
     for ((row, partId) <- realPartitionMap) {
@@ -73,35 +74,35 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
   "A CassandraRDDPartitioner" should " be creatable from a generic CassandraTableRDD" in {
     val rdd = testRdd
     val partitioner = rdd.partitionGenerator.getPartitioner[PKey]
-    partitioner.numPartitions should be(rdd.partitions.length)
+    partitioner.get.numPartitions should be(rdd.partitions.length)
   }
 
-  it should " be created by keyBy with out any parameters" in {
+  "keyBy" should "create a partitioned RDD without any parameters" in {
     val keyedRdd = testRdd.keyBy[CassandraRow]
     checkPartitionerKeys(keyedRdd)
   }
 
-  it should " be created by keyBy when selecting the Partition Key" in {
+  it should "create a partitioned RDD selecting the Partition Key" in {
     val keyedRdd = testRdd.keyBy[CassandraRow](PartitionKeyColumns)
     checkPartitionerKeys(keyedRdd)
   }
 
-  it should " be created by keyBy when the partition key is mapped to something else" in {
+  it should "create a partitioned RDD when the partition key is mapped to something else" in {
     val keyedRdd = testRdd.keyBy[CassandraRow](SomeColumns("key" as "notkey"))
     checkPartitionerKeys(keyedRdd)
   }
 
-  it should " be created by keyBy with a case class" in {
+  it should "create a partitioned RDD with a case class" in {
     val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
     checkPartitionerKeys(keyedRdd)
   }
 
-  it should " be created by keyBy with a case class with more than the Partition Key" in {
+  it should "create a partitioned RDD with a case class with more than the Partition Key" in {
     val keyedRdd = testRdd.keyBy[PKeyCKey]
     checkPartitionerKeys(keyedRdd)
   }
 
-  it should " not be created with a keyBy that does not cover the Partition Key" in {
+  it should "NOT create a partitioned RDD that does not cover the Partition Key" in {
     val keyedRdd = testRdd.keyBy[Tuple1[Int]](SomeColumns("ckey"))
     keyedRdd.partitioner.isEmpty should be(true)
   }
@@ -110,5 +111,50 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
     testRdd.partitioner should be(None)
   }
 
+  it should " be able to be assigned a partititoner from RDD with the same key" in {
+    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
+    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).withPartitioner(keyedRdd.partitioner)
+    checkPartitionerKeys(otherRdd)
+  }
+
+  it should " be joinable against an RDD without a partitioner" in {
+    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
+    val joinedRdd = keyedRdd.join(sc.parallelize(1 to rowCount).map(x => (PKey(x), -x)))
+    val results = joinedRdd.values.collect
+    results should have length (rowCount)
+    for (row <- results) {
+      row._1.getInt("key") should be(-row._2)
+    }
+  }
+
+  it should "not shuffle during a join with an RDD with the same partitioner" in {
+    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
+    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).withPartitioner(keyedRdd.partitioner)
+    val joinRdd = keyedRdd.join(otherRdd)
+    joinRdd.toDebugString should not contain ("+-")
+    // "+-" in the debug string means there is more than 1 stage and thus a shuffle
+  }
+
+  it should "correctly join against an RDD with the same partitioner" in {
+    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
+    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).withPartitioner(keyedRdd.partitioner)
+    val joinRdd = keyedRdd.join(otherRdd)
+    val results = joinRdd.values.collect()
+    results should have length (rowCount)
+    for (row <- results) {
+      row._1.getInt("key") should be(row._2.getInt("key"))
+    }
+  }
+
+  it should "not shuffle in a keyed selfjoin" in {
+    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
+    val joinRdd = keyedRdd.join(keyedRdd)
+    val results = joinRdd.values.collect()
+    results should have length (rowCount)
+    joinRdd.toDebugString should not contain ("+-")
+    for (row <- results) {
+      row._1.getInt("key") should be(row._2.getInt("key"))
+    }
+  }
 
 }
