@@ -17,10 +17,24 @@ import com.datastax.spark.connector.writer.RowWriterFactory
 import scala.reflect.ClassTag
 import scala.util.Try
 
-class CassandraRDDPartitioner[Key : ClassTag, V](
+/**
+  * A [[org.apache.spark.Partitioner]] implementation which performs the inverse
+  * operation of a traditional C* hashing. Requires the Key type and the token
+  * value type V.
+  *
+  * Will take objects of type Key and determine given the token ragnes in `indexedRanges`
+  * which range the Key would belong in given the C* schema in `TableDef`
+  *
+  * Under the hood uses a bound statement to generate routing keys which are then
+  * use the driver's internal token factories to determine the token for the
+  * routing key.
+  *
+  * Should only be made by calls to CassandraGenerator.getPartitioner[K]
+  */
+private[connector] class CassandraRDDPartitioner[Key : ClassTag, V](
   val partitions: Seq[CassandraPartition],
   val indexedRanges: Seq[(Int, Seq[(Token[V], Token[V], Boolean)])],
-  tableDef: TableDef,
+  val tableDef: TableDef,
   connector: CassandraConnector,
   tokenBounds: (Token[V], Token[V]))(
 implicit
@@ -56,6 +70,10 @@ implicit
     }
   }
 
+  /**
+    * Since Driver TokenRange objects are not serializable we replicate the
+    * logic for TokenRange.contains(Token) here.
+    */
   def indexOfPartitionContaining(token: com.datastax.driver.core.Token): Int = {
     val tokenValue = token.getValue.asInstanceOf[V]
     indexedRanges.find { case (index, ranges) =>
