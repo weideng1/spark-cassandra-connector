@@ -26,10 +26,8 @@ import scala.util.Try
   * which range the Key would belong in given the C* schema in `TableDef`
   *
   * Under the hood uses a bound statement to generate routing keys which are then
-  * use the driver's internal token factories to determine the token for the
+  * used the driver's internal token factories to determine the token for the
   * routing key.
-  *
-  * Should only be made by calls to CassandraGenerator.getPartitioner[K]
   */
 private[connector] class CassandraRDDPartitioner[Key : ClassTag, V](
   val partitions: Seq[CassandraPartition],
@@ -232,7 +230,8 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
 
   /**
     * Attempts to build a partitioner for this C* RDD if it was keyed with Type Key. If possible
-    * returns a partitioner of type Key.
+    * returns a partitioner of type Key. The type is required so we know what kind of objects we
+    * will need to bind to prepared statements when determining the token on new objects.
     */
   def getPartitioner[Key: ClassTag]()(
     implicit rowWriterFactory: RowWriterFactory[Key]) : Option[CassandraRDDPartitioner[Key, V]] = {

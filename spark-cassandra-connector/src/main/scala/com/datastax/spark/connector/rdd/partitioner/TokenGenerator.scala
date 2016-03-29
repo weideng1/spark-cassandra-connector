@@ -19,11 +19,13 @@ private[connector] class TokenGenerator[T] (
     session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
   }
 
+  //Makes a PreparedStatement which we use only to generate routing keys on the client
   val stmt = connector.withSessionDo { session => prepareDummyStatement(session, tableDef) }
   val metadata = connector.withClusterDo(_.getMetadata)
 
-  val routingKeyGenerator = new RoutingKeyGenerator(tableDef, tableDef.partitionKey.map(_
-    .columnName))
+  val routingKeyGenerator = new RoutingKeyGenerator(
+    tableDef,
+    tableDef.partitionKey.map(_.columnName))
 
   val boundStmtBuilder = new BoundStatementBuilder(
     rowWriter,

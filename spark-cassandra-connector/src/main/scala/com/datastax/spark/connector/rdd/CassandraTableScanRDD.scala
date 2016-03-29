@@ -99,7 +99,8 @@ class CassandraTableScanRDD[R] private[connector](
       where = where,
       limit = limit,
       clusteringOrder = clusteringOrder,
-      readConf = readConf)
+      readConf = readConf,
+      overridePartitioner = overridePartitioner)
   }
 
 
@@ -114,7 +115,8 @@ class CassandraTableScanRDD[R] private[connector](
       where = where,
       limit = limit,
       clusteringOrder = clusteringOrder,
-      readConf = readConf)
+      readConf = readConf,
+      overridePartitioner = overridePartitioner)
   }
 
   private def checkPartitionerValid(partitioner: CassandraRDDPartitioner[_, _]) = {

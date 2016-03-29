@@ -72,7 +72,7 @@ class TokenGeneratorSpec extends SparkCassandraITFlatSpecBase with Inspectors  {
     }
   }
 
-  it should "be able to determine simple complex partition keys" in {
+  it should "be able to determine simple complex keys" in {
     val tokenGenerator = new TokenGenerator[ComplexKey](conn, complexTableDef, complexRW)
     for ((key, token) <- complexTokenMap) {
       tokenGenerator.getTokenFor(key) should be (token)

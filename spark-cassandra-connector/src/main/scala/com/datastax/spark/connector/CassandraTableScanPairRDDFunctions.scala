@@ -17,11 +17,11 @@ class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[(K, V)
 
     val partitioner = thatRdd.partitioner match {
       case Some(part: CassandraRDDPartitioner[K, _]) => part
-
       case Some(other: Partitioner) =>
         throw new IllegalArgumentException(s"Partitioner $other is not a CassandraRDDPartitioner")
       case None => throw new IllegalArgumentException(s"$thatRdd has no partitioner to apply")
     }
+
     applyPartitioner(partitioner)
   }
 
@@ -30,6 +30,7 @@ class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[(K, V)
     */
   def applyPartitioner(
     partitioner: CassandraRDDPartitioner[K, _]): CassandraTableScanRDD[(K, V)] = {
+
     rdd.withPartitioner(Some(partitioner))
   }
 
