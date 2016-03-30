@@ -2,9 +2,13 @@ package com.datastax.spark.connector
 
 import com.datastax.spark.connector.rdd.CassandraTableScanRDD
 import com.datastax.spark.connector.rdd.partitioner.CassandraRDDPartitioner
+import com.datastax.spark.connector.rdd.reader.RowReaderFactory
+import com.datastax.spark.connector.writer.RowWriterFactory
 import org.apache.spark.Partitioner
 
-class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[(K, V)]) extends
+import scala.reflect.ClassTag
+
+final class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[(K, V)]) extends
   Serializable {
 
   /**
@@ -33,5 +37,21 @@ class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[(K, V)
 
     rdd.withPartitioner(Some(partitioner))
   }
+}
 
+final class CassandraTableScanRDDFunctions[R](rdd: CassandraTableScanRDD[R]) extends Serializable {
+  /**
+    * Shortcut for `rdd.keyBy[K].applyPartitionerFrom(thatRDD[K, V])` where K is the key
+    * type of the target RDD. This guarentees that the partitioner applied to this rdd
+    * will match the key type.
+    */
+  def keyAndApplyPartitionerFrom[K, X](
+    thatRDD: CassandraTableScanRDD[(K, X)])(
+  implicit
+    classTag: ClassTag[K],
+    rrf: RowReaderFactory[K],
+    rwf: RowWriterFactory[K]) = {
+
+    rdd.keyBy[K].applyPartitionerFrom(thatRDD)
+  }
 }

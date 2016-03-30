@@ -6,8 +6,8 @@ import scala.concurrent.Future
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql.CassandraConnector
 import java.lang.{Integer => JInt}
+import scala.collection.JavaConversions._
 
-import org.apache.spark.HashPartitioner
 import org.apache.spark.rdd.RDD
 
 import scala.reflect.ClassTag
@@ -54,7 +54,7 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
   // Make sure that all tests have enough partitions to make things interesting
   val customReadConf = ReadConf(splitCount = Some(20))
 
-  val testRdd = sc.cassandraTable(ks, "table1").withReadConf(customReadConf)
+  val testRDD = sc.cassandraTable(ks, "table1").withReadConf(customReadConf)
   val joinTarget = sc.cassandraTable(ks, "table2")
 
   def getPartitionMap[T](rdd: RDD[T]): Map[T, Int] = {
@@ -73,55 +73,55 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
   }
 
   "A CassandraRDDPartitioner" should " be creatable from a generic CassandraTableRDD" in {
-    val rdd = testRdd
+    val rdd = testRDD
     val partitioner = rdd.partitionGenerator.getPartitioner[PKey]
     partitioner.get.numPartitions should be(rdd.partitions.length)
   }
 
   "keyBy" should "create a partitioned RDD without any parameters" in {
-    val keyedRdd = testRdd.keyBy[CassandraRow]
-    checkPartitionerKeys(keyedRdd)
+    val keyedRDD = testRDD.keyBy[CassandraRow]
+    checkPartitionerKeys(keyedRDD)
   }
 
   it should "create a partitioned RDD selecting the Partition Key" in {
-    val keyedRdd = testRdd.keyBy[CassandraRow](PartitionKeyColumns)
-    checkPartitionerKeys(keyedRdd)
+    val keyedRDD = testRDD.keyBy[CassandraRow](PartitionKeyColumns)
+    checkPartitionerKeys(keyedRDD)
   }
 
   it should "create a partitioned RDD when the partition key is mapped to something else" in {
-    val keyedRdd = testRdd.keyBy[CassandraRow](SomeColumns("key" as "notkey"))
-    checkPartitionerKeys(keyedRdd)
+    val keyedRDD = testRDD.keyBy[CassandraRow](SomeColumns("key" as "notkey"))
+    checkPartitionerKeys(keyedRDD)
   }
 
   it should "create a partitioned RDD with a case class" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    checkPartitionerKeys(keyedRdd)
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    checkPartitionerKeys(keyedRDD)
   }
 
   it should "create a partitioned RDD with a case class with more than the Partition Key" in {
-    val keyedRdd = testRdd.keyBy[PKeyCKey]
-    checkPartitionerKeys(keyedRdd)
+    val keyedRDD = testRDD.keyBy[PKeyCKey]
+    checkPartitionerKeys(keyedRDD)
   }
 
   it should "NOT create a partitioned RDD that does not cover the Partition Key" in {
-    val keyedRdd = testRdd.keyBy[Tuple1[Int]](SomeColumns("ckey"))
-    keyedRdd.partitioner.isEmpty should be(true)
+    val keyedRDD = testRDD.keyBy[Tuple1[Int]](SomeColumns("ckey"))
+    keyedRDD.partitioner.isEmpty should be(true)
   }
 
   "CassandraTableScanRDD " should " not have a partitioner by default" in {
-    testRdd.partitioner should be(None)
+    testRDD.partitioner should be(None)
   }
 
   it should " be able to be assigned a partititoner from RDD with the same key" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRdd)
-    checkPartitionerKeys(otherRdd)
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    val otherRDD = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRDD)
+    checkPartitionerKeys(otherRDD)
   }
 
   it should " be joinable against an RDD without a partitioner" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    val joinedRdd = keyedRdd.join(sc.parallelize(1 to rowCount).map(x => (PKey(x), -x)))
-    val results = joinedRdd.values.collect
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    val joinedRDD = keyedRDD.join(sc.parallelize(1 to rowCount).map(x => (PKey(x), -x)))
+    val results = joinedRDD.values.collect
     results should have length (rowCount)
     for (row <- results) {
       row._1.getInt("key") should be(-row._2)
@@ -129,18 +129,18 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
   }
 
   it should "not shuffle during a join with an RDD with the same partitioner" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRdd)
-    val joinRdd = keyedRdd.join(otherRdd)
-    joinRdd.toDebugString should not contain ("+-")
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    val otherRDD = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRDD)
+    val joinRDD = keyedRDD.join(otherRDD)
+    joinRDD.toDebugString should not contain ("+-")
     // "+-" in the debug string means there is more than 1 stage and thus a shuffle
   }
 
   it should "correctly join against an RDD with the same partitioner" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    val otherRdd = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRdd)
-    val joinRdd = keyedRdd.join(otherRdd)
-    val results = joinRdd.values.collect()
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    val otherRDD = joinTarget.keyBy[PKey](SomeColumns("key")).applyPartitionerFrom(keyedRDD)
+    val joinRDD = keyedRDD.join(otherRDD)
+    val results = joinRDD.values.collect()
     results should have length (rowCount)
     for (row <- results) {
       row._1.getInt("key") should be(row._2.getInt("key"))
@@ -148,20 +148,32 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
   }
 
   it should "not shuffle in a keyed selfjoin" in {
-    val keyedRdd = testRdd.keyBy[PKey](SomeColumns("key"))
-    val joinRdd = keyedRdd.join(keyedRdd)
-    val results = joinRdd.values.collect()
+    val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
+    val joinRDD = keyedRDD.join(keyedRDD)
+    val results = joinRDD.values.collect()
     results should have length (rowCount)
-    joinRdd.toDebugString should not contain ("+-")
+    joinRDD.toDebugString should not contain ("+-")
     for (row <- results) {
       row._1.getInt("key") should be(row._2.getInt("key"))
     }
   }
 
   "CassandraTableScanPairRDDFunctions" should "not apply an empty partitioner" in {
-    val keyedRdd = testRdd.keyBy[Tuple1[Int]](SomeColumns("ckey"))
+    val keyedRDD = testRDD.keyBy[Tuple1[Int]](SomeColumns("ckey"))
     intercept[IllegalArgumentException] {
-      joinTarget.keyBy[Tuple1[Int]](SomeColumns("key")).applyPartitionerFrom(keyedRdd)
+      joinTarget.keyBy[Tuple1[Int]](SomeColumns("key")).applyPartitionerFrom(keyedRDD)
+    }
+  }
+
+  "CassandraTableScanRDDFunctions" should "key and apply another RDD" in {
+    val keyedRDD = testRDD.keyBy[PKey]
+    val otherRDD = joinTarget.keyAndApplyPartitionerFrom(keyedRDD)
+    val joinRDD = keyedRDD.join(otherRDD)
+    joinRDD.toDebugString should not contain ("+-")
+    val results = joinRDD.values.collect()
+    results should have length (rowCount)
+    for (row <- results) {
+      row._1.getInt("key") should be(row._2.getInt("key"))
     }
   }
 

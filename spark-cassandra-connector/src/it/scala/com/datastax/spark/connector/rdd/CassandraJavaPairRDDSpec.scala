@@ -37,6 +37,18 @@ class CassandraJavaPairRDDSpec extends SparkCassandraITFlatSpecBase {
           session.execute(s"INSERT INTO $ks.test_table_1 (key, key2, value) VALUES ('c', 'y', 8)")
           session.execute(s"INSERT INTO $ks.test_table_1 (key, key2, value) VALUES ('c', 'z', 9)")
         },
+         Future {
+          session.execute(s"CREATE TABLE $ks.test_table_2 (key TEXT, key2 TEXT, value INT, PRIMARY KEY (key, key2))")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('a', 'x', 1)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('a', 'y', 2)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('a', 'z', 3)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('b', 'x', 4)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('b', 'y', 5)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('b', 'z', 6)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('c', 'x', 7)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('c', 'y', 8)")
+          session.execute(s"INSERT INTO $ks.test_table_2 (key, key2, value) VALUES ('c', 'z', 9)")
+        },
 
         Future {
           session.execute(s"CREATE TABLE IF NOT EXISTS $ks.wide_rows(key INT, group INT, value VARCHAR, PRIMARY KEY (key, group))")
@@ -127,6 +139,32 @@ class CassandraJavaPairRDDSpec extends SparkCassandraITFlatSpecBase {
     results(10).toSeq should be(Seq(10, 11, 12))
     results(20).size should be(3)
     results(20).toSeq should be(Seq(20, 21, 22))
+  }
+
+  it should "allow to use of keyByAndApplyPartitioner" in {
+
+    val rdd1 = javaFunctions(sc)
+      .cassandraTable(ks, "test_table_1", mapColumnTo(classOf[(Integer)]))
+      .select("value", "key")
+      .keyBy(
+        mapColumnTo(classOf[String]),
+        mapToRow(classOf[String]),
+        classOf[String],
+        "key")
+
+    val rdd2 = javaFunctions(sc)
+      .cassandraTable(ks, "test_table_2", mapColumnTo(classOf[(Integer)]))
+      .select("value", "key")
+      .keyAndApplyPartitionerFrom(
+        mapColumnTo(classOf[String]),
+        mapToRow(classOf[String]),
+        classOf[String],
+        rdd1)
+
+    val joinRDD = rdd1.join(rdd2)
+    joinRDD.toDebugString should not contain ("+-")
+    val results = joinRDD.values.collect()
+    results should have length (27)
   }
 
 
