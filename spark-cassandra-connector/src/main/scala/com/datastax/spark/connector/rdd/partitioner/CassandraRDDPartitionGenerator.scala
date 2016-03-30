@@ -30,13 +30,39 @@ import scala.util.Try
   * routing key.
   */
 private[connector] class CassandraRDDPartitioner[Key : ClassTag, V](
-  val partitions: Seq[CassandraPartition],
+  inputPartitions: Seq[CassandraPartition],
   val indexedRanges: Seq[(Int, Seq[(Token[V], Token[V], Boolean)])],
   val tableDef: TableDef,
   connector: CassandraConnector,
   tokenBounds: (Token[V], Token[V]))(
 implicit
   @transient rwf:RowWriterFactory[Key]) extends Partitioner with Logging {
+
+  /**
+    * Adjust the partition key string in only of the Token clauses to be used with this scan
+    * incase the names differ from the inputPartitions
+    */
+  val partitions: Seq[CassandraPartition] = {
+    val pk = tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
+    for (partition <- inputPartitions) yield {
+      val localTokenRanges = for (cqlTokenRange <- partition.tokenRanges) yield {
+        CqlTokenRange(cqlTokenRange.cql.changePartitionKey(pk), cqlTokenRange.values: _*)
+      }
+      partition.copy(tokenRanges = localTokenRanges)
+    }
+  }
+
+
+
+  def copy(
+    inputPartitions: Seq[CassandraPartition] = partitions,
+    indexedRanges: Seq[(Int, Seq[(Token[V], Token[V], Boolean)])] = indexedRanges,
+    tableDef: TableDef = tableDef,
+    connector: CassandraConnector = connector,
+    tokenBounds: (Token[V], Token[V]) = tokenBounds):CassandraRDDPartitioner[Key, V] = {
+
+    new CassandraRDDPartitioner[Key, V](partitions, indexedRanges, tableDef, connector, tokenBounds)
+  }
 
   implicit val tO = tokenBounds._1.ord
 
@@ -92,6 +118,19 @@ implicit
   }
 
   override def numPartitions: Int = partitions.length
+
+  override def equals(that: Any): Boolean = that match {
+    case that: CassandraRDDPartitioner[Key, V] => {
+      this.indexedRanges == that.indexedRanges && this.tableDef.keyspaceName == that.tableDef.keyspaceName
+    }
+    case _ => {
+      false
+    }
+  }
+
+  override def hashCode: Int = {
+    partitions.hashCode() + tableDef.keyspaceName.hashCode * 31
+  }
 
 }
 /** Creates CassandraPartitions for given Cassandra table */
@@ -167,15 +206,15 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     val pk = tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
 
     if (range.end == tokenFactory.minToken)
-      List(CqlTokenRange(s"token($pk) > ?", startToken))
+      List(CqlTokenRange(GreaterThan(pk), startToken))
     else if (range.start == tokenFactory.minToken)
-      List(CqlTokenRange(s"token($pk) <= ?", endToken))
+      List(CqlTokenRange(LessThanOrEquals(pk), endToken))
     else if (!range.isWrapAround)
-      List(CqlTokenRange(s"token($pk) > ? AND token($pk) <= ?", startToken, endToken))
+      List(CqlTokenRange(GreaterThanAndLessThanOrEquals(pk), startToken, endToken))
     else
       List(
-        CqlTokenRange(s"token($pk) > ?", startToken),
-        CqlTokenRange(s"token($pk) <= ?", endToken))
+        CqlTokenRange(GreaterThan(pk), startToken),
+        CqlTokenRange(LessThanOrEquals(pk), endToken))
   }
 
   private def createTokenRangeSplitter: TokenRangeSplitter[V, T] = {
@@ -193,6 +232,7 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
   lazy val ranges = partitionsAndRanges.map(x =>
     (x._2, x._3.map( range =>
       (range.start, range.end, range.isWrapAround))))
+
 
   /**
     * Generates a list of the CassandraPartitions to be used in the TableScanRDD and a list

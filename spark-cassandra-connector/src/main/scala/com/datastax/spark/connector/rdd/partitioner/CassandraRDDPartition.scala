@@ -5,7 +5,25 @@ import java.net.InetAddress
 import org.apache.spark.Partition
 
 /** Stores a CQL `WHERE` predicate matching a range of tokens. */
-case class CqlTokenRange(cql: String, values: Any*)
+case class CqlTokenRange(cql: TokenClause, values: Any*)
+
+
+sealed trait TokenClause {
+  def changePartitionKey(pk: String): TokenClause
+}
+
+case class LessThanOrEquals(pk: String) extends TokenClause {
+  override def toString(): String = s"token($pk) <= ?"
+  override def changePartitionKey(pk: String): LessThanOrEquals = copy(pk = pk)
+}
+case class GreaterThan(pk: String) extends TokenClause {
+  override def toString(): String = s"token($pk) > ?"
+  override def changePartitionKey(pk: String): GreaterThan = copy(pk = pk)
+}
+case class GreaterThanAndLessThanOrEquals(pk: String) extends TokenClause {
+  override def toString(): String = s"token($pk) > ? AND token($pk) <= ?"
+  override def changePartitionKey(pk: String): GreaterThanAndLessThanOrEquals = copy(pk = pk)
+}
 
 trait EndpointPartition extends Partition {
   def endpoints: Iterable[InetAddress]

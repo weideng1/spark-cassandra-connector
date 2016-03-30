@@ -32,10 +32,10 @@ final class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[
   /**
     * Use a specific [[CassandraRDDPartitioner]] to use with this PairRDD.
     */
-  def applyPartitioner(
-    partitioner: CassandraRDDPartitioner[K, _]): CassandraTableScanRDD[(K, V)] = {
+  def applyPartitioner[X](
+    partitioner: CassandraRDDPartitioner[K, X]): CassandraTableScanRDD[(K, V)] = {
 
-    rdd.withPartitioner(Some(partitioner))
+    rdd.withPartitioner(Some(partitioner.copy(tableDef = rdd.tableDef)))
   }
 }
 

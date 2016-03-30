@@ -40,6 +40,26 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
       },
       Future {
         session.execute(
+          s"""CREATE TABLE $ks.a (x INT, a INT, b INT, PRIMARY KEY (x)
+              |)""".stripMargin)
+        val ps = session.prepare( s"""INSERT INTO $ks.a (x, a, b) VALUES (?, ?, ?)""")
+        val results = for (value <- 1 to rowCount) yield {
+          session.executeAsync(ps.bind(value: JInt, value: JInt, value: JInt))
+        }
+        results.map(_.get)
+      },
+      Future {
+        session.execute(
+          s"""CREATE TABLE $ks.b (y INT, c INT, d INT, PRIMARY KEY (y)
+              |)""".stripMargin)
+        val ps = session.prepare( s"""INSERT INTO $ks.b (y, c, d) VALUES (?, ?, ?)""")
+        val results = for (value <- 1 to rowCount) yield {
+          session.executeAsync(ps.bind(value: JInt, value: JInt, value: JInt))
+        }
+        results.map(_.get)
+      },
+      Future {
+        session.execute(
           s"""CREATE TABLE $ks.table2 (key INT, ckey INT, value INT, PRIMARY KEY
               |(key, ckey))""".stripMargin)
         val ps = session.prepare( s"""INSERT INTO $ks.table2 (key, ckey, value) VALUES (?, ?, ?)""")
@@ -147,6 +167,27 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
     }
   }
 
+  it should "join against an RDD with different partition key names without a shuffle " in {
+    val a = sc.cassandraTable[(Int, Int)](ks, "a")
+      .withReadConf(customReadConf)
+      .select("a" as "_1", "b" as "_2", "x")
+      .keyBy[Tuple1[Int]]("x")
+
+    val b = sc.cassandraTable[(Int, Int)](ks, "b")
+      .select("c" as "_1", "d" as "_2", "y")
+      .keyBy[Tuple1[Int]]("y")
+      .applyPartitionerFrom(a)
+
+    a.partitioner.get should be(b.partitioner.get)
+    val joinRDD = a.join(b)
+    val results = joinRDD.values.collect()
+    results should have length (rowCount)
+    joinRDD.toDebugString should not contain ("+-")
+    for (row <- results) {
+      row._1 should be(row._2)
+    }
+  }
+
   it should "not shuffle in a keyed selfjoin" in {
     val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
     val joinRDD = keyedRDD.join(keyedRDD)
@@ -175,6 +216,8 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
     for (row <- results) {
       row._1.getInt("key") should be(row._2.getInt("key"))
     }
+
+
   }
 
 }

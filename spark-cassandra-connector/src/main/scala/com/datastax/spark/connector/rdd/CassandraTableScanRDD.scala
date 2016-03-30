@@ -120,34 +120,25 @@ class CassandraTableScanRDD[R] private[connector](
   }
 
   private def checkPartitionerValid(partitioner: CassandraRDDPartitioner[_, _]) = {
+    checkPartitionerKeyspace(partitioner)
+    val partitionerPartitionKey = partitioner.partitionKeyWriter.columnNames.toSet
+    val missingColumns = partitionerPartitionKey -- selectedColumnNames.toSet
+    if (missingColumns.size != 0) {
+      throw new IllegalArgumentException(
+        s"""Partitioner requires columns ${partitionerPartitionKey.mkString(",")} and this RDD
+         |does not contain ${missingColumns.mkString(",")}
+        """.stripMargin
+      )
+    }
+  }
+
+  private def checkPartitionerKeyspace(partitioner: CassandraRDDPartitioner[_, _]) = {
     if (tableDef.keyspaceName != partitioner.tableDef.keyspaceName) {
       throw new IllegalArgumentException(
         s"""Keyspace of partitioner $partitioner(${partitioner.tableDef.keyspaceName}) does not
            |match the keyspace of this RDD ${tableDef.keyspaceName}
          """.stripMargin)
       }
-    val theirPartitionKey = partitioner.partitionKeyWriter.columnNames.toSet
-    val missingColumns = theirPartitionKey -- selectedColumnNames.toSet
-    if (missingColumns.size != 0) {
-      throw new IllegalArgumentException(
-        s"""Partitioner requires columns ${theirPartitionKey.mkString(",")} and this RDD does not
-         |contain ${missingColumns.mkString(",")}
-        """.stripMargin
-      )
-    }
-
-    val ourPartitonKey = tableDef.partitionKey.map(_.columnName).toSet
-    val differenceInPartitionKeys = theirPartitionKey.diff(ourPartitonKey)
-
-    if (differenceInPartitionKeys.size != 0) {
-      throw new IllegalArgumentException(
-        s"""Partition keys for the partitioner and this table do not match.
-           | Table's keys: ${ourPartitonKey.mkString(",")}
-           | Partitioner's Keys: ${theirPartitionKey.mkString(",")}
-           | Difference : ${differenceInPartitionKeys.mkString(",")}
-         """.stripMargin
-      )
-    }
   }
 
 
@@ -156,12 +147,26 @@ class CassandraTableScanRDD[R] private[connector](
     * the Partitioner of type [K]. End users will use the implicit provided in
     * [[CassandraTableScanPairRDDFunctions]]
     */
-  private[connector] def withPartitioner( partitioner: Option[Partitioner]): CassandraTableScanRDD[R] = {
+  private[connector] def withPartitioner[K, V](
+    partitioner: Option[Partitioner]): CassandraTableScanRDD[R] = {
+
     val cassPart = partitioner match {
-      case Some(cp: CassandraRDDPartitioner[_, _])  => {
-        checkPartitionerValid(cp)
-        Some(cp)
-      }
+      case Some(newPartitioner: CassandraRDDPartitioner[K, V]) => {
+        checkPartitionerKeyspace(newPartitioner)
+        partitioner match {
+          case Some(ourPartitioner: CassandraRDDPartitioner[K, V]) => {
+            Some(ourPartitioner.copy(
+              inputPartitions = newPartitioner.partitions,
+              indexedRanges = newPartitioner.indexedRanges
+            ))
+          }
+          case _ => {
+            checkPartitionerValid(newPartitioner)
+            Some(newPartitioner)
+            }
+          }
+        }
+
       case Some(other: Partitioner) => throw new IllegalArgumentException(
         s"""Unable to assign
           |non-CassandraRDDPartitioner $other to CassandraTableScanRDD """.stripMargin)
@@ -269,7 +274,7 @@ class CassandraTableScanRDD[R] private[connector](
 
   private def tokenRangeToCqlQuery(range: CqlTokenRange): (String, Seq[Any]) = {
     val columns = selectedColumnRefs.map(_.cql).mkString(", ")
-    val filter = (range.cql +: where.predicates).filter(_.nonEmpty).mkString(" AND ")
+    val filter = (range.cql.toString +: where.predicates).filter(_.nonEmpty).mkString(" AND ")
     val limitClause = limit.map(limit => s"LIMIT $limit").getOrElse("")
     val orderBy = clusteringOrder.map(_.toCql(tableDef)).getOrElse("")
     val quotedKeyspaceName = quote(keyspaceName)
