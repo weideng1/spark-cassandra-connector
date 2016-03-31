@@ -113,7 +113,8 @@ class CassandraRDDPartitioner[V, T <: Token[V]](
     if (!primaryKeyComplete && !whereColumnsAllIndexed) {
       val missing = pk -- whereColumns
       throw new UnsupportedOperationException(
-        s"Partition key predicate must include all partition key columns. Missing columns: ${missing.mkString(",")}"
+        s"Partition key predicate must include all partition key columns or partition key columns need" +
+          s" to be indexed. Missing columns: ${missing.mkString(",")}"
       )
     }
 
