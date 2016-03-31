@@ -126,7 +126,7 @@ implicit
     logDebug(
       s"""Building Partitioner with mapping
          |${partitionKeyMapping.map(x => (x.columnName, x.selectedAs))}
-         |for table $tableDef""".stripPrefix("|"))
+         |for table $tableDef""".stripMargin)
     implicitly[RowWriterFactory[Key]]
       .rowWriter (tableDef, partitionKeyMapping)
   }
@@ -134,10 +134,11 @@ implicit
   /**
     * Builds and makes sure we can make a rowWriter with the current TableDef and keyMapper
     */
-  def verify(): Unit = {
+  def verify(log: Boolean = true): Unit = {
     val attempt = Try(partitionKeyWriter)
     if (attempt.isFailure) {
-      logError("Unable to build partition key writer CassandraRDDPartitioner.", attempt.failed.get)
+      if (log)
+        logError("Unable to build partition key writer CassandraRDDPartitioner.", attempt.failed.get)
       throw attempt.failed.get
     }
   }
@@ -318,9 +319,12 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
   def getPartitioner[Key: ClassTag](keyMapper: ColumnSelector)(
     implicit rowWriterFactory: RowWriterFactory[Key]) : Option[CassandraRDDPartitioner[Key, V, T]] = {
     val part = Try {
-      new CassandraRDDPartitioner[Key, V, T](
+      val newPartitioner = new CassandraRDDPartitioner[Key, V, T](
         partitioningMetaData = getPartitioningMetadata,
         keyMapper)
+      // This is guarenteed to succeed so we don't want to send out an ERROR message if it breaks
+      newPartitioner.verify(log = false)
+      newPartitioner
     }
 
     if (part.isFailure) {
