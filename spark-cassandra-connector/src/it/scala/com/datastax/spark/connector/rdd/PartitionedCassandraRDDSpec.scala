@@ -6,8 +6,8 @@ import scala.concurrent.Future
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql.CassandraConnector
 import java.lang.{Integer => JInt}
-import scala.collection.JavaConversions._
 
+import scala.collection.JavaConversions._
 import org.apache.spark.rdd.RDD
 
 import scala.reflect.ClassTag
@@ -15,6 +15,10 @@ import scala.reflect.ClassTag
 case class PKey(key: Int)
 
 case class PKeyCKey(key: Int, ckey: Int)
+
+case class X(x: Int)
+
+case class WeirdMapping(weirdkey: Int, weirdcol: Int)
 
 class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
 
@@ -94,7 +98,7 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
 
   "A CassandraRDDPartitioner" should " be creatable from a generic CassandraTableRDD" in {
     val rdd = testRDD
-    val partitioner = rdd.partitionGenerator.getPartitioner[PKey]
+    val partitioner = rdd.partitionGenerator.getPartitioner[PKey](PartitionKeyColumns)
     partitioner.get.numPartitions should be(rdd.partitions.length)
   }
 
@@ -188,7 +192,57 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
     }
   }
 
-  it should "not shuffle in a keyed selfjoin" in {
+  it should "join against an RDD with different names and mappings without a shuffle" in {
+    val a = sc.cassandraTable[(Int, Int)](ks, "a")
+      .withReadConf(customReadConf)
+      .select("a" as "_1", "b" as "_2", "x")
+      .keyBy[X]("x")
+
+    val b_prime = sc.cassandraTable[(Int, Int)](ks, "b")
+      .select("c" as "_1", "d" as "_2", "y" as "x")
+      .keyBy[X]("y" as "x")
+
+    b_prime.partitioner shouldBe defined
+
+    val b = b_prime.applyPartitionerFrom(a)
+
+    a.partitioner.get should be(b.partitioner.get)
+    val joinRDD = a.join(b)
+    val results = joinRDD.values.collect()
+    results should have length (rowCount)
+    joinRDD.toDebugString should not contain ("+-")
+    for (row <- results) {
+      row._1 should be(row._2)
+    }
+  }
+
+  it should "join against an RDD with strange mapping without a shuffle" in {
+    val a = sc.cassandraTable[(Int, Int)](ks, "a")
+      .withReadConf(customReadConf)
+      .select("a" as "_1", "b" as "_2", "x" as "weirdkey")
+      .keyBy[WeirdMapping]("x" as "weirdkey", "b" as "weirdcol")
+
+    a.partitioner shouldBe defined
+
+    val b_prime = sc.cassandraTable[(Int, Int)](ks, "b")
+      .select("c" as "_1", "d" as "_2", "y" as "weirdkey")
+      .keyBy[WeirdMapping]("y" as "weirdkey", "d" as "weirdcol")
+
+    b_prime.partitioner shouldBe defined
+
+    val b = b_prime.applyPartitionerFrom(a)
+
+    a.partitioner.get should be(b.partitioner.get)
+    val joinRDD = a.join(b)
+    val results = joinRDD.values.collect()
+    results should have length (rowCount)
+    joinRDD.toDebugString should not contain ("+-")
+    for (row <- results) {
+      row._1 should be(row._2)
+    }
+  }
+
+  it should "not shuffle in a keyed self-join" in {
     val keyedRDD = testRDD.keyBy[PKey](SomeColumns("key"))
     val joinRDD = keyedRDD.join(keyedRDD)
     val results = joinRDD.values.collect()

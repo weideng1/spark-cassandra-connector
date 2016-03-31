@@ -9,20 +9,20 @@ case class CqlTokenRange(cql: TokenClause, values: Any*)
 
 
 sealed trait TokenClause {
-  def changePartitionKey(pk: String): TokenClause
+  def withPartitionKey(pk: String): TokenClause
 }
 
-case class LessThanOrEquals(pk: String) extends TokenClause {
+case class TokenLessThanOrEquals(pk: String) extends TokenClause {
   override def toString(): String = s"token($pk) <= ?"
-  override def changePartitionKey(pk: String): LessThanOrEquals = copy(pk = pk)
+  override def withPartitionKey(pk: String): TokenLessThanOrEquals = copy(pk = pk)
 }
-case class GreaterThan(pk: String) extends TokenClause {
+case class TokenGreaterThan(pk: String) extends TokenClause {
   override def toString(): String = s"token($pk) > ?"
-  override def changePartitionKey(pk: String): GreaterThan = copy(pk = pk)
+  override def withPartitionKey(pk: String): TokenGreaterThan = copy(pk = pk)
 }
-case class GreaterThanAndLessThanOrEquals(pk: String) extends TokenClause {
+case class TokenGreaterThanAndLessThanOrEquals(pk: String) extends TokenClause {
   override def toString(): String = s"token($pk) > ? AND token($pk) <= ?"
-  override def changePartitionKey(pk: String): GreaterThanAndLessThanOrEquals = copy(pk = pk)
+  override def withPartitionKey(pk: String): TokenGreaterThanAndLessThanOrEquals = copy(pk = pk)
 }
 
 trait EndpointPartition extends Partition {

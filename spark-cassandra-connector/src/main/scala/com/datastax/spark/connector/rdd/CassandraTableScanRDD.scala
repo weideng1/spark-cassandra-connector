@@ -5,13 +5,15 @@ import java.io.IOException
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql._
 import com.datastax.spark.connector.rdd.partitioner._
+import com.datastax.spark.connector.rdd.partitioner.dht.{Token => ConnectorToken}
 import com.datastax.spark.connector.rdd.reader._
 import com.datastax.spark.connector.types.ColumnType
 import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, Predicate, RangePredicate}
 import com.datastax.spark.connector.util.Quote._
 import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
-import com.datastax.driver.core._
 import com.datastax.spark.connector.writer.RowWriterFactory
+
+import com.datastax.driver.core._
 import org.apache.spark.metrics.InputMetricsUpdater
 import org.apache.spark.{Partition, Partitioner, SparkContext, TaskContext}
 
@@ -119,60 +121,36 @@ class CassandraTableScanRDD[R] private[connector](
       overridePartitioner = overridePartitioner)
   }
 
-  private def checkPartitionerValid(partitioner: CassandraRDDPartitioner[_, _]) = {
-    checkPartitionerKeyspace(partitioner)
-    val partitionerPartitionKey = partitioner.partitionKeyWriter.columnNames.toSet
-    val missingColumns = partitionerPartitionKey -- selectedColumnNames.toSet
-    if (missingColumns.size != 0) {
-      throw new IllegalArgumentException(
-        s"""Partitioner requires columns ${partitionerPartitionKey.mkString(",")} and this RDD
-         |does not contain ${missingColumns.mkString(",")}
-        """.stripMargin
-      )
-    }
-  }
-
-  private def checkPartitionerKeyspace(partitioner: CassandraRDDPartitioner[_, _]) = {
-    if (tableDef.keyspaceName != partitioner.tableDef.keyspaceName) {
-      throw new IllegalArgumentException(
-        s"""Keyspace of partitioner $partitioner(${partitioner.tableDef.keyspaceName}) does not
-           |match the keyspace of this RDD ${tableDef.keyspaceName}
-         """.stripMargin)
-      }
-  }
-
-
   /**
     * Internal method for assigning a partitioner to this RDD, this lacks type safety checks for
     * the Partitioner of type [K]. End users will use the implicit provided in
     * [[CassandraTableScanPairRDDFunctions]]
     */
-  private[connector] def withPartitioner[K, V](
+  private[connector] def withPartitioner[K, V, T <: ConnectorToken[V]](
     partitioner: Option[Partitioner]): CassandraTableScanRDD[R] = {
 
     val cassPart = partitioner match {
-      case Some(newPartitioner: CassandraRDDPartitioner[K, V]) => {
-        checkPartitionerKeyspace(newPartitioner)
-        partitioner match {
-          case Some(ourPartitioner: CassandraRDDPartitioner[K, V]) => {
-            Some(ourPartitioner.copy(
-              inputPartitions = newPartitioner.partitions,
-              indexedRanges = newPartitioner.indexedRanges
-            ))
-          }
-          case _ => {
-            checkPartitionerValid(newPartitioner)
-            Some(newPartitioner)
-            }
-          }
+      case Some(newPartitioner: CassandraRDDPartitioner[K, V, T]) => {
+        this.partitioner match {
+          case Some(currentPartitioner: CassandraRDDPartitioner[K, V, T]) =>
+            /** Preserve the mapping set by the current partitioner **/
+            logDebug(
+              s"""Preserving Partitioner: $currentPartitioner with mapping
+                 |${currentPartitioner.keyMapping}""".stripMargin)
+            Some(
+              newPartitioner
+                .withTableDef(tableDef)
+                .withKeyMapping(currentPartitioner.keyMapping))
+          case _ =>
+            logDebug(s"Assigning new Partitioner $newPartitioner")
+            Some(newPartitioner.withTableDef(tableDef))
         }
-
+      }
       case Some(other: Partitioner) => throw new IllegalArgumentException(
         s"""Unable to assign
           |non-CassandraRDDPartitioner $other to CassandraTableScanRDD """.stripMargin)
       case None => None
     }
-
 
     new CassandraTableScanRDD[R](
       sc = sc,
@@ -184,7 +162,7 @@ class CassandraTableScanRDD[R] private[connector](
       limit = limit,
       clusteringOrder = clusteringOrder,
       readConf = readConf,
-      overridePartitioner = partitioner)
+      overridePartitioner = cassPart)
   }
 
   /** Selects a subset of columns mapped to the key and returns an RDD of pairs.
@@ -211,8 +189,10 @@ class CassandraTableScanRDD[R] private[connector](
     val partitionKeyColumnNames = PartitionKeyColumns.selectFrom(tableDef).map(_.columnName).toSet
 
     if (selectedColumnNames.containsAll(partitionKeyColumnNames)) {
-      val partitioner = partitionGenerator.getPartitioner[K]
-
+      val partitioner = partitionGenerator.getPartitioner[K](columns)
+      logDebug(
+        s"""Made partitioner ${partitioner.get} with
+           |selector ${partitioner.get.keyMapping} for $this""".stripMargin)
       convertTo[(K, R)].withPartitioner(partitioner)
 
     } else {
@@ -251,11 +231,10 @@ class CassandraTableScanRDD[R] private[connector](
   override def getPartitions: Array[Partition] = {
     verify() // let's fail fast
     val partitions: Array[Partition] = partitioner match {
-      case Some(cassPartitioner: CassandraRDDPartitioner[_, _]) => {
-        checkPartitionerValid(cassPartitioner)
+      case Some(cassPartitioner: CassandraRDDPartitioner[_, _, _]) => {
+        cassPartitioner.verify()
         cassPartitioner.partitions.toArray[Partition]
       }
-
       case Some(other: Partitioner) =>
         throw new IllegalArgumentException(s"Invalid partitioner $other")
 
@@ -449,6 +428,6 @@ object CassandraTableScanRDD {
       readConf = ReadConf.fromSparkConf(sc.getConf),
       columnNames = AllColumns,
       where = CqlWhereClause.empty)
-    rdd.withPartitioner(rdd.partitionGenerator.getPartitioner[K])
+    rdd.withPartitioner(rdd.partitionGenerator.getPartitioner[K](PartitionKeyColumns))
   }
 }

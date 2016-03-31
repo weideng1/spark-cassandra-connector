@@ -2,6 +2,7 @@ package com.datastax.spark.connector
 
 import com.datastax.spark.connector.rdd.CassandraTableScanRDD
 import com.datastax.spark.connector.rdd.partitioner.CassandraRDDPartitioner
+import com.datastax.spark.connector.rdd.partitioner.dht.Token
 import com.datastax.spark.connector.rdd.reader.RowReaderFactory
 import com.datastax.spark.connector.writer.RowWriterFactory
 import org.apache.spark.Partitioner
@@ -20,7 +21,7 @@ final class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[
     thatRdd: CassandraTableScanRDD[(K, X)]): CassandraTableScanRDD[(K, V)] = {
 
     val partitioner = thatRdd.partitioner match {
-      case Some(part: CassandraRDDPartitioner[K, _]) => part
+      case Some(part: CassandraRDDPartitioner[K, _, _]) => part
       case Some(other: Partitioner) =>
         throw new IllegalArgumentException(s"Partitioner $other is not a CassandraRDDPartitioner")
       case None => throw new IllegalArgumentException(s"$thatRdd has no partitioner to apply")
@@ -32,10 +33,9 @@ final class CassandraTableScanPairRDDFunctions[K, V](rdd: CassandraTableScanRDD[
   /**
     * Use a specific [[CassandraRDDPartitioner]] to use with this PairRDD.
     */
-  def applyPartitioner[X](
-    partitioner: CassandraRDDPartitioner[K, X]): CassandraTableScanRDD[(K, V)] = {
-
-    rdd.withPartitioner(Some(partitioner.copy(tableDef = rdd.tableDef)))
+  def applyPartitioner[TokenValue, T <: Token[TokenValue]](
+    partitioner: CassandraRDDPartitioner[K, TokenValue, T]): CassandraTableScanRDD[(K, V)] = {
+    rdd.withPartitioner(Some(partitioner))
   }
 }
 
