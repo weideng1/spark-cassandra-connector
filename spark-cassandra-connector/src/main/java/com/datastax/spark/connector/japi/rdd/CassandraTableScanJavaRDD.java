@@ -141,7 +141,7 @@ public class CassandraTableScanJavaRDD<R> extends CassandraJavaRDD<R> {
      * Builds a K/V Pair RDD using the partitioner from an existing
      * CassandraTableScanPairRDD. Since we cannot determine ahead of time
      * the type of the PairRDD or the type of it's partitioner this method will
-     * throw exceptions if the Partitioner is not a CassandraRDDPartitioner at
+     * throw exceptions if the Partitioner is not a CassandraPartitioner at
      * runtime.
      */
     public <K> CassandraJavaPairRDD<K, R> keyAndApplyPartitionerFrom(

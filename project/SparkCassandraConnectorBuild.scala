@@ -98,7 +98,7 @@ object CassandraSparkBuild extends Build {
     id = s"$namespace-doc",
     base = file(s"$namespace-doc"),
     settings = defaultSettings ++ Seq(libraryDependencies ++= Dependencies.spark)
-  ) dependsOn(connector)
+  ) dependsOn connector
 
   def crossBuildPath(base: sbt.File, v: String): sbt.File = base / s"scala-$v" / "src"
 

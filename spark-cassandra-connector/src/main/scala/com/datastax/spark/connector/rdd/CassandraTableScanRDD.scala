@@ -130,9 +130,9 @@ class CassandraTableScanRDD[R] private[connector](
     partitioner: Option[Partitioner]): CassandraTableScanRDD[R] = {
 
     val cassPart = partitioner match {
-      case Some(newPartitioner: CassandraRDDPartitioner[K, V, T]) => {
+      case Some(newPartitioner: CassandraPartitioner[K, V, T]) => {
         this.partitioner match {
-          case Some(currentPartitioner: CassandraRDDPartitioner[K, V, T]) =>
+          case Some(currentPartitioner: CassandraPartitioner[K, V, T]) =>
             /** Preserve the mapping set by the current partitioner **/
             logDebug(
               s"""Preserving Partitioner: $currentPartitioner with mapping
@@ -148,7 +148,7 @@ class CassandraTableScanRDD[R] private[connector](
       }
       case Some(other: Partitioner) => throw new IllegalArgumentException(
         s"""Unable to assign
-          |non-CassandraRDDPartitioner $other to CassandraTableScanRDD """.stripMargin)
+          |non-CassandraPartitioner $other to CassandraTableScanRDD """.stripMargin)
       case None => None
     }
 
@@ -220,9 +220,9 @@ class CassandraTableScanRDD[R] private[connector](
 
   @transient lazy val partitionGenerator = {
     if (containsPartitionKey(where)) {
-      CassandraRDDPartitionGenerator(connector, tableDef, Some(1), splitSize)
+      CassandraPartitionGenerator(connector, tableDef, Some(1), splitSize)
     } else {
-      CassandraRDDPartitionGenerator(connector, tableDef, splitCount, splitSize)
+      CassandraPartitionGenerator(connector, tableDef, splitCount, splitSize)
     }
   }
 
@@ -231,7 +231,7 @@ class CassandraTableScanRDD[R] private[connector](
   override def getPartitions: Array[Partition] = {
     verify() // let's fail fast
     val partitions: Array[Partition] = partitioner match {
-      case Some(cassPartitioner: CassandraRDDPartitioner[_, _, _]) => {
+      case Some(cassPartitioner: CassandraPartitioner[_, _, _]) => {
         cassPartitioner.verify()
         cassPartitioner.partitions.toArray[Partition]
       }
@@ -249,9 +249,9 @@ class CassandraTableScanRDD[R] private[connector](
   private lazy val nodeAddresses = new NodeAddresses(connector)
 
   override def getPreferredLocations(split: Partition): Seq[String] =
-    split.asInstanceOf[CassandraPartition].endpoints.flatMap(nodeAddresses.hostNames).toSeq
+    split.asInstanceOf[CassandraPartition[_, _]].endpoints.flatMap(nodeAddresses.hostNames).toSeq
 
-  private def tokenRangeToCqlQuery(range: CqlTokenRange): (String, Seq[Any]) = {
+  private def tokenRangeToCqlQuery(range: CqlTokenRange[_, _]): (String, Seq[Any]) = {
     val columns = selectedColumnRefs.map(_.cql).mkString(", ")
     val filter = (range.cql.toString +: where.predicates).filter(_.nonEmpty).mkString(" AND ")
     val limitClause = limit.map(limit => s"LIMIT $limit").getOrElse("")
@@ -288,7 +288,7 @@ class CassandraTableScanRDD[R] private[connector](
 
   private def fetchTokenRange(
     session: Session,
-    range: CqlTokenRange,
+    range: CqlTokenRange[_, _],
     inputMetricsUpdater: InputMetricsUpdater): Iterator[R] = {
 
     val (cql, values) = tokenRangeToCqlQuery(range)
@@ -314,7 +314,7 @@ class CassandraTableScanRDD[R] private[connector](
 
   override def compute(split: Partition, context: TaskContext): Iterator[R] = {
     val session = connector.openSession()
-    val partition = split.asInstanceOf[CassandraPartition]
+    val partition = split.asInstanceOf[CassandraPartition[_, _]]
     val tokenRanges = partition.tokenRanges
     val metricsUpdater = InputMetricsUpdater(context, readConf)
 
@@ -322,7 +322,7 @@ class CassandraTableScanRDD[R] private[connector](
     // flatMap on iterator is lazy, therefore a query for the next token range is executed not earlier
     // than all of the rows returned by the previous query have been consumed
     val rowIterator = tokenRanges.iterator.flatMap(
-      fetchTokenRange(session, _, metricsUpdater))
+      fetchTokenRange(session, _: CqlTokenRange[_, _], metricsUpdater))
     val countingIterator = new CountingIterator(rowIterator, limit)
 
     context.addTaskCompletionListener { (context) =>

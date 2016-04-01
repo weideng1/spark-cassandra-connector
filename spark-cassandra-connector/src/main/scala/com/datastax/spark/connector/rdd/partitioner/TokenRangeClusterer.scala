@@ -9,7 +9,7 @@ import com.datastax.spark.connector.rdd.partitioner.dht.{Token, TokenRange}
 import scala.annotation.tailrec
 
 /** Divides a set of token ranges into groups containing not more than `maxRowCountPerGroup` rows
-  * and not more than `maxGroupSize` token ranges. Each group will form a single `CassandraRDDPartition`.
+  * and not more than `maxGroupSize` token ranges. Each group will form a single `CassandraPartition`.
   *
   * The algorithm is as follows:
   * 1. Sort token ranges by endpoints lexicographically.

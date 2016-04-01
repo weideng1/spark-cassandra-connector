@@ -3,67 +3,18 @@ package com.datastax.spark.connector.rdd.partitioner
 import scala.collection.JavaConversions._
 import scala.collection.parallel.ForkJoinTaskSupport
 import scala.concurrent.forkjoin.ForkJoinPool
+import scala.language.existentials
+
 import org.apache.spark.{Logging, Partitioner}
+
 import com.datastax.driver.core.{Metadata, TokenRange => DriverTokenRange}
 import com.datastax.spark.connector.{ColumnSelector, PartitionKeyColumns}
 import com.datastax.spark.connector.cql.{CassandraConnector, TableDef}
 import com.datastax.spark.connector.rdd.partitioner.dht.{Token, TokenFactory, TokenRange}
 import com.datastax.spark.connector.util.Quote._
 import com.datastax.spark.connector.writer.RowWriterFactory
-
 import scala.reflect.ClassTag
 import scala.util.Try
-
-
-
-case class TokenBounds[V](minToken: Token[V], maxToken: Token[V])
-
-case class PartitioningMetaData[V, T <: Token[V]](
-  private val groupedTokenRanges: Seq[Seq[TokenRange[V, T]]],
-  tableDef: TableDef,
-  tokenBounds: TokenBounds[V],
-  connector: CassandraConnector) {
-
-  private def rangeToCqlTokenRange(range: TokenRange[V, T]) = {
-    val startToken = range.start.value
-    val endToken = range.end.value
-    val wrapAround = range.isWrapAround
-    val pk = tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
-    if (range.end == tokenBounds.minToken)
-      List(CqlTokenRange(TokenGreaterThan(pk), startToken))
-    else if (range.start == tokenBounds.minToken)
-      List(CqlTokenRange(TokenLessThanOrEquals(pk), endToken))
-    else if (!range.isWrapAround)
-      List(CqlTokenRange(TokenGreaterThanAndLessThanOrEquals(pk), startToken, endToken))
-    else
-      List(
-        CqlTokenRange(TokenGreaterThan(pk), startToken),
-        CqlTokenRange(TokenLessThanOrEquals(pk), endToken))
-    }
-
-  private def sortedGroups = {
-    val grouped = for (group <- groupedTokenRanges) yield {
-       val replicas = group.map(_.replicas).reduce(_ intersect _)
-       val rowCount = group.map(_.dataSize).sum
-       (replicas, rowCount, group)
-     }
-    grouped.sortBy { case (replicas, rowCount, group) => (replicas.size, -rowCount) }
-  }
-
-  def getSortedTokenRanges: Seq[Seq[TokenRange[V, T]]] = {
-    sortedGroups.map(_._3)
-  }
-
-  def getCassandraPartitions: Seq[CassandraPartition] = {
-    sortedGroups
-      .sortBy { case (replicas, rowCount, group) => (replicas.size, -rowCount) }
-      .zipWithIndex
-      .map { case ((replicas, rowCount, group), index) =>
-        CassandraPartition(index, replicas, group.flatMap(rangeToCqlTokenRange), rowCount)
-  }
-
-  }
-}
 
 /**
   * A [[org.apache.spark.Partitioner]] implementation which performs the inverse
@@ -77,132 +28,111 @@ case class PartitioningMetaData[V, T <: Token[V]](
   * used the driver's internal token factories to determine the token for the
   * routing key.
   */
-private[connector] class CassandraRDDPartitioner[Key : ClassTag, V, T <: Token[V]](
-  partitioningMetaData: PartitioningMetaData[V, T],
+private[connector] class CassandraPartitioner[Key : ClassTag, V, T <: Token[V]](
+  private[connector] val connector: CassandraConnector,
+  private[connector] val tableDef: TableDef,
+  private[connector] val partitions: Seq[CassandraPartition[V, T]],
   val keyMapping: ColumnSelector = PartitionKeyColumns)(
 implicit
-  @transient rwf:RowWriterFactory[Key]) extends Partitioner with Logging {
+  @transient
+  rwf: RowWriterFactory[Key],
+  tokenFactory: TokenFactory[V, T]) extends Partitioner with Logging {
 
-  /**
-    * Changes the tableDef target of this partitioner. Can only be done within a keyspace
-    * verification of key mapping will occur with the call to [[verify()]]
-    */
-  def withTableDef(tableDef: TableDef): CassandraRDDPartitioner[Key, V, T] = {
-    if (tableDef.keyspaceName != partitioningMetaData.tableDef.keyspaceName) {
+  /** Changes the tableDef target of this partitioner. Can only be done within a keyspace
+    * verification of key mapping will occur with the call to [[verify()]] */
+  def withTableDef(tableDef: TableDef): CassandraPartitioner[Key, V, T] = {
+    if (tableDef.keyspaceName != this.tableDef.keyspaceName) {
       throw new IllegalArgumentException(
         s"""Cannot apply partitioner from keyspace
-           |${partitioningMetaData.tableDef.keyspaceName} to table
+           |${this.tableDef.keyspaceName} to table
            |${tableDef.keyspaceName}.${tableDef.tableName} because the keyspaces do
            |not match""".stripMargin)
     }
-
-    new CassandraRDDPartitioner[Key, V, T](
-      partitioningMetaData.copy(tableDef = tableDef), keyMapping)
+    new CassandraPartitioner[Key, V, T](connector, tableDef, partitions, keyMapping)
   }
 
-  /**
-    * Changes the current key mapping for this partitioner. Verification of mapping
-    * occurs on call to [[verify()]]
-    */
-  def withKeyMapping(keyMapping: ColumnSelector): CassandraRDDPartitioner[Key, V, T] = {
-    new CassandraRDDPartitioner[Key, V, T](
-      partitioningMetaData,
-      keyMapping)
-  }
+  /** Changes the current key mapping for this partitioner. Verification of the mapping
+    * occurs on call to [[verify()]] */
+  def withKeyMapping(keyMapping: ColumnSelector): CassandraPartitioner[Key, V, T] =
+    new CassandraPartitioner[Key, V, T](connector, tableDef, partitions, keyMapping)
 
 
-  def partitions: Seq[CassandraPartition] =
-    partitioningMetaData.getCassandraPartitions
+  private lazy val partitionKeyNames =
+    PartitionKeyColumns.selectFrom(tableDef).map(_.columnName).toSet
 
-
-  private val connector = partitioningMetaData.connector
-  private val tableDef = partitioningMetaData.tableDef
-
-  private lazy val partitionKeyNames = PartitionKeyColumns.selectFrom(tableDef).map(_.columnName).toSet
   private lazy val partitionKeyMapping = keyMapping
     .selectFrom(tableDef)
     .filter( colRef => partitionKeyNames.contains(colRef.columnName))
+
   private lazy val partitionKeyWriter = {
     logDebug(
       s"""Building Partitioner with mapping
          |${partitionKeyMapping.map(x => (x.columnName, x.selectedAs))}
          |for table $tableDef""".stripMargin)
     implicitly[RowWriterFactory[Key]]
-      .rowWriter (tableDef, partitionKeyMapping)
+      .rowWriter(tableDef, partitionKeyMapping)
   }
 
-  /**
-    * Builds and makes sure we can make a rowWriter with the current TableDef and keyMapper
-    */
+  /** Builds and makes sure we can make a rowWriter with the current TableDef and keyMapper */
   def verify(log: Boolean = true): Unit = {
     val attempt = Try(partitionKeyWriter)
     if (attempt.isFailure) {
       if (log)
-        logError("Unable to build partition key writer CassandraRDDPartitioner.", attempt.failed.get)
+        logError("Unable to build partition key writer CassandraPartitioner.", attempt.failed.get)
       throw attempt.failed.get
     }
   }
 
-  private val indexedRanges = partitioningMetaData.getSortedTokenRanges.zipWithIndex
-
-  private val tokenBounds = partitioningMetaData.tokenBounds
-  private val minTokenValue = tokenBounds.minToken.value
-  private val maxTokenValue = tokenBounds.maxToken.value
-  implicit val tokenOrder = tokenBounds.minToken.ord
-
-
-
-  /**
-   * Since the Token Generator relies on a (non-serializable) prepared statement we need to
-   * make sure it is not serialized to executors and is made fresh on each executor
-   */
-  @transient lazy val tokenGenerator = {
+  /** Since the Token Generator relies on a (non-serializable) prepared statement we need to
+    * make sure it is not serialized to executors and is made fresh on each executor */
+  @transient
+  private lazy val tokenGenerator =
     new TokenGenerator(connector, tableDef, partitionKeyWriter)
+
+  case class IndexedTokenRange(index: Int, range: TokenRange[V, T])
+
+  @transient
+  private lazy val indexedTokenRanges: Seq[IndexedTokenRange] =
+    for (p <- partitions; tr <- p.tokenRanges) yield
+      IndexedTokenRange(p.index, tr.range)
+
+  @transient
+  private lazy val tokenRangeLookupTable: BucketingRangeIndex[IndexedTokenRange, T] = {
+
+    implicit val rangeBounds = new RangeBounds[IndexedTokenRange, T] {
+      override def start(range: IndexedTokenRange): T = range.range.start
+      override def end(range: IndexedTokenRange): T = range.range.end
+      override def wrapsAround(range: IndexedTokenRange): Boolean = range.range.isWrapAround
+      override def contains(range: IndexedTokenRange, point: T): Boolean = range.range.contains(point)
+    }
+
+    implicit val tokenOrdering = tokenFactory.tokenOrdering
+    implicit val tokenBucketing = tokenFactory.tokenBucketing
+
+    new BucketingRangeIndex[IndexedTokenRange, T](indexedTokenRanges)
   }
 
   override def getPartition(key: Any): Int = {
     key match {
-      case x: Key => {
-        val token = tokenGenerator.getTokenFor(x)
-        indexOfPartitionContaining(token)
-      }
-      case other => throw new IllegalArgumentException(s"Couldn't determine the key from object $other")
+      case x: Key =>
+        val driverToken = tokenGenerator.getTokenFor(x)
+        val connectorToken = tokenFactory.tokenFromString(driverToken.getValue.toString)
+        tokenRangeLookupTable.ranges(connectorToken).head.index
+      case other =>
+        throw new IllegalArgumentException(s"Couldn't determine the key from object $other")
     }
   }
 
-  /**
-    * Since Driver TokenRange objects are not serializable we replicate the
-    * logic for TokenRange.contains(Token) here.
-    */
-  def indexOfPartitionContaining(token: com.datastax.driver.core.Token): Int = {
-
-    val tokenValue = token.getValue.asInstanceOf[V]
-
-    indexedRanges.find { case (ranges, index) =>
-      ranges.exists { case tokenRange =>
-        val (startValue, endValue, wrap) =
-          (tokenRange.start.value, tokenRange.end.value, tokenRange.isWrapAround)
-
-        ((endValue == minTokenValue && tokenOrder.lt(startValue, tokenValue))
-          || (startValue == minTokenValue && tokenOrder.gteq(endValue, tokenValue))
-          || (!wrap && tokenOrder.lt(startValue, tokenValue) && tokenOrder.gteq(endValue, tokenValue))
-          || (wrap && (tokenOrder.lt(startValue, tokenValue) || tokenOrder.gteq(endValue, tokenValue))))
-      }
-    }.getOrElse(throw new IllegalArgumentException(s"Could not find partition for token $tokenValue"))
-      ._2
-  }
-
-  override def numPartitions: Int = partitions.length
+  override def numPartitions: Int =
+    partitions.length
 
   override def equals(that: Any): Boolean = that match {
-    case that: CassandraRDDPartitioner[Key, V, T] => {
-      (this.indexedRanges == that.indexedRanges
+    case that: CassandraPartitioner[Key, V, T] =>
+      (this.indexedTokenRanges == that.indexedTokenRanges
         && this.tableDef.keyspaceName == that.tableDef.keyspaceName
         && this.connector == that.connector)
-    }
-    case _ => {
+    case _ =>
       false
-    }
   }
 
   override def hashCode: Int = {
@@ -211,9 +141,9 @@ implicit
 
 }
 /** Creates CassandraPartitions for given Cassandra table */
-class CassandraRDDPartitionGenerator[V, T <: Token[V]](
+class CassandraPartitionGenerator[V, T <: Token[V]](
     connector: CassandraConnector,
-    val tableDef: TableDef,
+    tableDef: TableDef,
     splitCount: Option[Int],
     splitSize: Long)(
   implicit
@@ -271,7 +201,7 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
       splitter: TokenRangeSplitter[V, T]): Iterable[TokenRange] = {
 
     val parTokenRanges = tokenRanges.par
-    parTokenRanges.tasksupport = new ForkJoinTaskSupport(CassandraRDDPartitionGenerator.pool)
+    parTokenRanges.tasksupport = new ForkJoinTaskSupport(CassandraPartitionGenerator.pool)
     (for (tokenRange <- parTokenRanges;
           split <- splitter.split(tokenRange, splitSize)) yield split).seq
   }
@@ -287,15 +217,13 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     }
   }
 
-  lazy val tokenBounds = TokenBounds(tokenFactory.minToken, tokenFactory.maxToken)
+  private val primaryKeyStr =
+    tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
 
-  def partitions = getPartitioningMetadata.getCassandraPartitions
+  private def rangeToCql(range: TokenRange): Seq[CqlTokenRange[V, T]] =
+    range.unwrap.map(CqlTokenRange(_, primaryKeyStr))
 
-  /**
-    * Generates a list of the CassandraPartitions to be used in the TableScanRDD and a list
-    * of the TokenRanges used to craft those partitions along with their indexes.
-    */
-  def getPartitioningMetadata: PartitioningMetaData[V, T] = {
+  def partitions: Seq[CassandraPartition[V, T]] = {
     val tokenRanges = splitCount match {
       case Some(1) => Seq(fullRange)
       case _ => describeRing
@@ -308,7 +236,20 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     val clusterer = new TokenRangeClusterer[V, T](splitSize, maxGroupSize)
     val tokenRangeGroups = clusterer.group(splits).toArray
 
-    PartitioningMetaData[V, T](tokenRangeGroups, tableDef, tokenBounds, connector)
+    val partitions = for (group <- tokenRangeGroups) yield {
+      val replicas = group.map(_.replicas).reduce(_ intersect _)
+      val rowCount = group.map(_.dataSize).sum
+      val cqlRanges = group.flatMap(rangeToCql)
+      // partition index will be set later
+      CassandraPartition(0, replicas, cqlRanges, rowCount)
+    }
+
+    // sort partitions and assign sequential numbers so that
+    // partition index matches the order of partitions in the sequence
+    partitions
+      .sortBy(p => (p.endpoints.size, -p.dataSize))
+      .zipWithIndex
+      .map { case (p, index) => p.copy(index = index) }
   }
 
   /**
@@ -316,12 +257,11 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
     * returns a partitioner of type Key. The type is required so we know what kind of objects we
     * will need to bind to prepared statements when determining the token on new objects.
     */
-  def getPartitioner[Key: ClassTag](keyMapper: ColumnSelector)(
-    implicit rowWriterFactory: RowWriterFactory[Key]) : Option[CassandraRDDPartitioner[Key, V, T]] = {
+  def getPartitioner[Key: ClassTag : RowWriterFactory](
+      keyMapper: ColumnSelector): Option[CassandraPartitioner[Key, V, T]] = {
+
     val part = Try {
-      val newPartitioner = new CassandraRDDPartitioner[Key, V, T](
-        partitioningMetaData = getPartitioningMetadata,
-        keyMapper)
+      val newPartitioner = new CassandraPartitioner(connector, tableDef, partitions, keyMapper)
       // This is guarenteed to succeed so we don't want to send out an ERROR message if it breaks
       newPartitioner.verify(log = false)
       newPartitioner
@@ -333,10 +273,9 @@ class CassandraRDDPartitionGenerator[V, T <: Token[V]](
 
     part.toOption
   }
-
 }
 
-object CassandraRDDPartitionGenerator {
+object CassandraPartitionGenerator {
   /** Affects how many concurrent threads are used to fetch split information from cassandra nodes, in `getPartitions`.
     * Does not affect how many Spark threads fetch data from Cassandra. */
   val MaxParallelism = 16
@@ -349,7 +288,7 @@ object CassandraRDDPartitionGenerator {
   type V = t forSome { type t }
   type T = t forSome { type t <: Token[V] }
 
-  /** Creates a `CassandraRDDPartitionGenerator` for the given cluster and table.
+  /** Creates a `CassandraPartitionGenerator` for the given cluster and table.
     * Unlike the class constructor, this method does not take the generic `V` and `T` parameters,
     * and therefore you don't need to specify the ones proper for the partitioner used in the
     * Cassandra cluster. */
@@ -357,10 +296,10 @@ object CassandraRDDPartitionGenerator {
     conn: CassandraConnector,
     tableDef: TableDef,
     splitCount: Option[Int],
-    splitSize: Int): CassandraRDDPartitionGenerator[V, T] = {
+    splitSize: Int): CassandraPartitionGenerator[V, T] = {
 
     val tokenFactory = getTokenFactory(conn)
-    new CassandraRDDPartitionGenerator(conn, tableDef, splitCount, splitSize)(tokenFactory)
+    new CassandraPartitionGenerator(conn, tableDef, splitCount, splitSize)(tokenFactory)
   }
 
   def getTokenFactory(conn: CassandraConnector) : TokenFactory[V, T] = {
