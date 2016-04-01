@@ -189,7 +189,7 @@ class CassandraTableScanRDD[R] private[connector](
     val partitionKeyColumnNames = PartitionKeyColumns.selectFrom(tableDef).map(_.columnName).toSet
 
     if (selectedColumnNames.containsAll(partitionKeyColumnNames)) {
-      val partitioner = partitionGenerator.getPartitioner[K](columns)
+      val partitioner = partitionGenerator.partitioner[K](columns)
       logDebug(
         s"""Made partitioner ${partitioner.get} with
            |selector ${partitioner.get.keyMapping} for $this""".stripMargin)
@@ -248,12 +248,16 @@ class CassandraTableScanRDD[R] private[connector](
 
   private lazy val nodeAddresses = new NodeAddresses(connector)
 
+  private lazy val partitionKeyStr =
+    tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
+
   override def getPreferredLocations(split: Partition): Seq[String] =
     split.asInstanceOf[CassandraPartition[_, _]].endpoints.flatMap(nodeAddresses.hostNames).toSeq
 
   private def tokenRangeToCqlQuery(range: CqlTokenRange[_, _]): (String, Seq[Any]) = {
     val columns = selectedColumnRefs.map(_.cql).mkString(", ")
-    val filter = (range.cql.toString +: where.predicates).filter(_.nonEmpty).mkString(" AND ")
+    val (cql, values) = range.cql(partitionKeyStr)
+    val filter = (cql +: where.predicates).filter(_.nonEmpty).mkString(" AND ")
     val limitClause = limit.map(limit => s"LIMIT $limit").getOrElse("")
     val orderBy = clusteringOrder.map(_.toCql(tableDef)).getOrElse("")
     val quotedKeyspaceName = quote(keyspaceName)
@@ -262,7 +266,7 @@ class CassandraTableScanRDD[R] private[connector](
       s"SELECT $columns " +
         s"FROM $quotedKeyspaceName.$quotedTableName " +
         s"WHERE $filter $orderBy $limitClause ALLOW FILTERING"
-    val queryParamValues = range.values ++ where.values
+    val queryParamValues = values ++ where.values
     (queryTemplate, queryParamValues)
   }
 
@@ -293,7 +297,7 @@ class CassandraTableScanRDD[R] private[connector](
 
     val (cql, values) = tokenRangeToCqlQuery(range)
     logDebug(
-      s"Fetching data for range ${range.cql} " +
+      s"Fetching data for range ${range.cql(partitionKeyStr)} " +
         s"with $cql " +
         s"with params ${values.mkString("[", ",", "]")}")
     val stmt = createStatement(session, cql, values: _*)
@@ -304,7 +308,7 @@ class CassandraTableScanRDD[R] private[connector](
       val iterator = new PrefetchingResultSetIterator(rs, fetchSize)
       val iteratorWithMetrics = iterator.map(inputMetricsUpdater.updateMetrics)
       val result = iteratorWithMetrics.map(rowReader.read(_, columnNamesArray))
-      logDebug(s"Row iterator for range ${range.cql} obtained successfully.")
+      logDebug(s"Row iterator for range ${range.cql(partitionKeyStr)} obtained successfully.")
       result
     } catch {
       case t: Throwable =>
@@ -428,6 +432,6 @@ object CassandraTableScanRDD {
       readConf = ReadConf.fromSparkConf(sc.getConf),
       columnNames = AllColumns,
       where = CqlWhereClause.empty)
-    rdd.withPartitioner(rdd.partitionGenerator.getPartitioner[K](PartitionKeyColumns))
+    rdd.withPartitioner(rdd.partitionGenerator.partitioner[K](PartitionKeyColumns))
   }
 }

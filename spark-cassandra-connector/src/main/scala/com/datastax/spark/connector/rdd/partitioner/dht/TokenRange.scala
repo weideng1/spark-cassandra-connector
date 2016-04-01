@@ -25,3 +25,4 @@ case class TokenRange[V, T <: Token[V]] (
       || isWrapAround && token > start || token <= end)
   }
 }
+

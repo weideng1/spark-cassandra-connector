@@ -48,13 +48,14 @@ implicit
            |${tableDef.keyspaceName}.${tableDef.tableName} because the keyspaces do
            |not match""".stripMargin)
     }
-    new CassandraPartitioner[Key, V, T](connector, tableDef, partitions, keyMapping)
+
+    new CassandraPartitioner(connector, tableDef, partitions, keyMapping)
   }
 
   /** Changes the current key mapping for this partitioner. Verification of the mapping
     * occurs on call to [[verify()]] */
   def withKeyMapping(keyMapping: ColumnSelector): CassandraPartitioner[Key, V, T] =
-    new CassandraPartitioner[Key, V, T](connector, tableDef, partitions, keyMapping)
+    new CassandraPartitioner(connector, tableDef, partitions, keyMapping)
 
 
   private lazy val partitionKeyNames =
@@ -217,11 +218,8 @@ class CassandraPartitionGenerator[V, T <: Token[V]](
     }
   }
 
-  private val primaryKeyStr =
-    tableDef.partitionKey.map(_.columnName).map(quote).mkString(", ")
-
   private def rangeToCql(range: TokenRange): Seq[CqlTokenRange[V, T]] =
-    range.unwrap.map(CqlTokenRange(_, primaryKeyStr))
+    range.unwrap.map(CqlTokenRange(_))
 
   def partitions: Seq[CassandraPartition[V, T]] = {
     val tokenRanges = splitCount match {
@@ -257,7 +255,7 @@ class CassandraPartitionGenerator[V, T <: Token[V]](
     * returns a partitioner of type Key. The type is required so we know what kind of objects we
     * will need to bind to prepared statements when determining the token on new objects.
     */
-  def getPartitioner[Key: ClassTag : RowWriterFactory](
+  def partitioner[Key: ClassTag : RowWriterFactory](
       keyMapper: ColumnSelector): Option[CassandraPartitioner[Key, V, T]] = {
 
     val part = Try {

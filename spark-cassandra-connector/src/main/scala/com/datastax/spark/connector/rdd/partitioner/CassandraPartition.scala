@@ -7,12 +7,11 @@ import org.apache.spark.Partition
 import com.datastax.spark.connector.rdd.partitioner.dht.{Token, TokenFactory, TokenRange}
 
 /** Stores a CQL `WHERE` predicate matching a range of tokens. */
-case class CqlTokenRange[V, T <: Token[V]]
-    (range: TokenRange[V, T], pk: String)(implicit tf: TokenFactory[V, T]) {
+case class CqlTokenRange[V, T <: Token[V]](range: TokenRange[V, T])(implicit tf: TokenFactory[V, T]) {
 
   require(!range.isWrapAround)
 
-  val (cql, values): (String, Seq[Any]) =
+  def cql(pk: String): (String, Seq[Any]) =
     if (range.start == tf.minToken)
       (s"token($pk) <= ?", Seq(range.end.value))
     else if (range.end == tf.minToken)

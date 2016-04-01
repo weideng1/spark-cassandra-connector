@@ -98,7 +98,7 @@ class PartitionedCassandraRDDSpec extends SparkCassandraITFlatSpecBase {
 
   "A CassandraRDDPartitioner" should " be creatable from a generic CassandraTableRDD" in {
     val rdd = testRDD
-    val partitioner = rdd.partitionGenerator.getPartitioner[PKey](PartitionKeyColumns)
+    val partitioner = rdd.partitionGenerator.partitioner[PKey](PartitionKeyColumns)
     partitioner.get.numPartitions should be(rdd.partitions.length)
   }
 
